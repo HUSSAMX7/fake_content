@@ -1,3 +1,3 @@
-from agents.smart_parser import parse_template
+from agents.template_planner import plan_template
 
-__all__ = ["parse_template"]
+__all__ = ["plan_template"]

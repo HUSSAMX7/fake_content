@@ -8,3 +8,4 @@ class GraphState(TypedDict, total=False):
     tender_text: str
     instructions: list[InstructionItem]
     answers: list[TagAnswerOutput]
+    output_path: str

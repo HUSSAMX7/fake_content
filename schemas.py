@@ -38,3 +38,17 @@ class AllTagsAnswerOutput(BaseModel):
     answers: list[TagAnswerOutput] = Field(
         description="One entry per tag in the instructions list, same order"
     )
+
+
+class SpanReplacement(BaseModel):
+    span_index: int
+    tag_id: str
+    replacement: str = Field(
+        description="Text replacing the @ ... @@ block only. No @ or @@ markers."
+    )
+
+
+class IntegratorOutput(BaseModel):
+    replacements: list[SpanReplacement] = Field(
+        description="One replacement per marker span"
+    )

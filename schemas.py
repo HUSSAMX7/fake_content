@@ -15,12 +15,26 @@ class InstructionItem(BaseModel):
 
 
 class TemplatePlannerOutput(BaseModel):
-    marker_count: int = Field(
-        description="Exact number of @ ... @@ pairs found in the template"
-    )
     instructions: list[InstructionItem] = Field(
         description="One entry per @ ... @@ block in the template, in order of appearance"
     )
-    silent_template: str = Field(
-        description="Full template with each @ ... @@ block replaced by @TAG_XX@@ only"
+
+
+class QuestionAnswerItem(BaseModel):
+    question: str
+    answer: str = Field(
+        description="Full detailed answer extracted from the source document. No summarization."
+    )
+
+
+class TagAnswerOutput(BaseModel):
+    tag_id: str
+    question_answers: list[QuestionAnswerItem] = Field(
+        description="Full detailed answer for each question, in the same order as provided"
+    )
+
+
+class AllTagsAnswerOutput(BaseModel):
+    answers: list[TagAnswerOutput] = Field(
+        description="One entry per tag in the instructions list, same order"
     )

@@ -1,14 +1,10 @@
 import json
+import tempfile
+from pathlib import Path
 
-from docx import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from docx_integrator import (
-    apply_replacements_to_docx,
-    find_marker_spans,
-    iter_all_paragraphs,
-    match_tag,
-)
+from docx_integrator import apply_replacements_to_docx, match_tag, prepare_template
 from graph_state import GraphState
 from llm_config import llm
 from schemas import IntegratorOutput, TagAnswerOutput
@@ -17,60 +13,56 @@ SYSTEM_PROMPT = """\
 You are the Integrator agent — the final document writer.
 
 You receive marker spans from a Word template and factual research notes (question_answers) for \
-each matched tag. Write polished replacement text that reads as native content of the document \
-being produced — not as a summary or excerpt of external source materials.
-
-The replacements are inserted into the original Word file — only the @ ... @@ block is replaced; \
-surrounding text stays as-is.
+each matched tag. Return structured content blocks that will be rendered into the Word file with \
+proper formatting — only the @ ... @@ block is replaced; surrounding text and template design stay.
 
 Instruction compliance (HIGHEST PRIORITY):
 - Each span includes a `marker_instruction` — the exact text the template author wrote inside @ ... @@.
 - This is your writing brief. Read it carefully before writing anything.
-- Follow every requirement in the instruction: what to write, how to structure it, what to include \
-or exclude, format (paragraph, list, phases, table text), length, and tone.
-- Examples of instruction-driven output:
-  - "اكتب فقرة عن أهداف المشروع" → one formal paragraph about objectives.
-  - "اذكر المراحل الثلاث" → exactly three numbered phases with detail each.
-  - "قائمة بالمخرجات" → bullet or numbered list of deliverables.
-  - "جملة قصيرة" or inline span → brief phrase only, even if facts are abundant.
-- If the instruction specifies structure, match it exactly — do not impose your own structure.
-- Use question_answers as factual material to fulfill the instruction — never ignore the instruction \
-to write something generic.
+- Follow every requirement: what to write, structure, what to include or exclude, length, and tone.
+- Examples:
+  - "اكتب فقرة عن أهداف المشروع" → one `paragraph` block.
+  - "اذكر المراحل الثلاث" → three `numbered_item` blocks (or `heading` + `paragraph` per phase).
+  - "قائمة بالمخرجات" → multiple `bullet_item` or `numbered_item` blocks.
+  - "جملة قصيرة" or inline=true → one short `paragraph` block.
+- Use question_answers as factual material to fulfill the instruction.
+
+Output format — structured blocks (NOT plain text):
+Return a `blocks` list per span. Each block has `type` and `text`:
+
+| type | when to use |
+|------|-------------|
+| paragraph | Body text, formal prose, detailed explanations |
+| numbered_item | Ordered steps, phases, sequential deliverables |
+| bullet_item | Unordered lists, features, requirements |
+| heading | Sub-section title before related paragraphs |
+
+Rules for blocks:
+- Use multiple blocks to structure content — never cram everything into one block when a list or \
+sections are appropriate.
+- Each block's `text` is rich and complete — include every useful fact, never summarize.
+- For `numbered_item` and `bullet_item`: do NOT prefix text with numbers, bullets (•), or dashes — \
+Word adds list formatting automatically.
+- For inline=true spans: return one short `paragraph` block only.
+- Do NOT include @ or @@ in any block text.
 
 Document identity:
-- You are composing content that belongs inside a formal deliverable document.
-- Infer the document type and tone from the template instruction, section context, and surrounding text.
-- Write as if the facts are part of the document's own narrative — never reveal that they were \
-sourced from elsewhere.
+- Content belongs inside a formal deliverable document.
+- Infer document type and tone from instruction, section context, and surrounding text.
+- Never reveal that facts were sourced from elsewhere.
 
 Voice and style:
-- Formal, professional language appropriate to the document type and section context.
-- Integrate facts naturally into the document's flow — not as citations, quotes, or source summaries.
-- NEVER use meta-phrases that reference external materials, such as: "تنص المستندات", "مذكور في", \
-"وفق ما ورد", "كما ذكر في", "المذكورة في", or English equivalents ("according to", \
-"as stated in", "referenced in", "the documents mention").
-- State each name or term once in its most official complete form; do not list spelling variants.
-- If an answer is "غير متوفر", omit that point or write around it — never surface that phrase.
-
-Marker rules:
-- @ opens an instruction block; @@ closes it.
-- Match each span to the tag whose instruction text is most similar.
-- Return `replacement` as the text that replaces ONLY the @ ... @@ block.
-- Do NOT include @ or @@ in replacement.
+- Formal, professional language appropriate to the document type.
+- NEVER use meta-phrases: "تنص المستندات", "مذكور في", "وفق ما ورد", "كما ذكر في", \
+"according to", "as stated in", "referenced in".
+- State each name or term once in its most official form.
+- If an answer is "غير متوفر", omit that point — never surface that phrase.
 
 Content rules:
-1. Use ONLY facts from the provided question_answers. Do NOT invent information.
-2. Include EVERY useful fact from question_answers — do NOT summarize, compress, or skip details. \
-The final text must be information-rich; transforming style is allowed, losing content is not.
-3. When many facts exist, organize them with paragraphs, numbered lists, or bullet points — \
-never drop items to keep the text short.
-4. The instruction and section context override default formatting choices.
-5. If inline=true, write only a short phrase that fits between text_before and text_after — \
-as the instruction demands.
-6. If inline=false, write a full section per the instruction — length reflects both the instruction \
-requirements and the volume of available facts.
-7. Match the language of the template (Arabic or English).
-8. Return one replacement per span_index provided.
+1. Use ONLY facts from question_answers. Do NOT invent information.
+2. Include EVERY useful fact — transforming style is allowed, losing content is not.
+3. Match the language of the template (Arabic or English).
+4. Return one replacement per span_index provided.
 """
 
 
@@ -78,10 +70,8 @@ def _build_span_payloads(
     template_path: str,
     instructions,
     answers: list[TagAnswerOutput],
-) -> tuple[list[dict], list[dict]]:
-    doc = Document(template_path)
-    paragraphs = list(iter_all_paragraphs(doc))
-    spans = find_marker_spans(paragraphs)
+) -> tuple[tempfile.TemporaryDirectory[str], Path, list[dict], list[dict]]:
+    temp_dir, unpacked_dir, spans = prepare_template(template_path)
     answers_by_tag = {answer.tag_id: answer for answer in answers}
 
     payloads: list[dict] = []
@@ -111,28 +101,39 @@ def _build_span_payloads(
             }
         )
 
-    return spans, payloads
+    return temp_dir, unpacked_dir, spans, payloads
 
 
 def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
-    spans, payloads = _build_span_payloads(
+    temp_dir, unpacked_dir, spans, payloads = _build_span_payloads(
         template_path=template_path,
         instructions=state["instructions"],
         answers=state["answers"],
     )
 
-    if not payloads:
-        apply_replacements_to_docx(template_path, output_path, spans, {})
-        return {"output_path": output_path}
+    try:
+        if not payloads:
+            path = apply_replacements_to_docx(
+                template_path, output_path, spans, {}, unpacked_dir=unpacked_dir
+            )
+            return {"output_path": path}
 
-    result = llm.with_structured_output(IntegratorOutput).invoke(
-        [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(
-                content=f"Marker spans:\n{json.dumps(payloads, ensure_ascii=False, indent=2)}"
-            ),
-        ]
-    )
-    replacements = {item.span_index: item.replacement for item in result.replacements}
-    path = apply_replacements_to_docx(template_path, output_path, spans, replacements)
-    return {"output_path": path}
+        result = llm.with_structured_output(IntegratorOutput).invoke(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(
+                    content=f"Marker spans:\n{json.dumps(payloads, ensure_ascii=False, indent=2)}"
+                ),
+            ]
+        )
+        replacements = {item.span_index: item.blocks for item in result.replacements}
+        path = apply_replacements_to_docx(
+            template_path,
+            output_path,
+            spans,
+            replacements,
+            unpacked_dir=unpacked_dir,
+        )
+        return {"output_path": path}
+    finally:
+        temp_dir.cleanup()

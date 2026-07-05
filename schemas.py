@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Literal
 
 
 class InstructionItem(BaseModel):
@@ -40,14 +41,23 @@ class AllTagsAnswerOutput(BaseModel):
     )
 
 
+class ContentBlock(BaseModel):
+    type: Literal["paragraph", "numbered_item", "bullet_item", "heading"] = Field(
+        description=(
+            "paragraph: body text. numbered_item: ordered list entry. "
+            "bullet_item: bullet list entry. heading: section sub-heading."
+        )
+    )
+    text: str = Field(description="Full text for this block. Rich and detailed, never summarized.")
+
+
 class SpanReplacement(BaseModel):
     span_index: int
     tag_id: str
-    replacement: str = Field(
+    blocks: list[ContentBlock] = Field(
         description=(
-            "Complete replacement text for the @ ... @@ block. Must follow marker_instruction "
-            "exactly and include every useful fact from question_answers — rich and detailed, "
-            "never summarized. No @ or @@ markers."
+            "Structured content replacing the @ ... @@ block. Must follow marker_instruction. "
+            "Include every useful fact — use multiple blocks for paragraphs, lists, or phases."
         )
     )
 

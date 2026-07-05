@@ -13,12 +13,12 @@ load_dotenv()
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-TEMPLATE_PATH = r"D:\python\fake_content\after edit.docx"
-OUTPUT_PATH = r"D:\python\fake_content\output_draft.docx"
+TEMPLATE_PATH = r"C:\Users\hosam\OneDrive\سطح المكتب\نطاق العمل\good templete.docx"
+OUTPUT_PATH = r"C:\Users\hosam\OneDrive\سطح المكتب\fake_content\output_draft.docx"
 
 TENDER_PATHS = [
-    r"D:\python\fake_content1\_عروض فنية نماذج ناجحة\عروض فنية نماذج ناجحة\إعداد خطط استمرارية الأعمال للخدمات الحكومية\إعداد خطط استمرارية الأعمال للخدمات الحكومية\كراسة الشروط والمواصفات.pdf",
-    r"D:\python\fake_content1\_عروض فنية نماذج ناجحة\عروض فنية نماذج ناجحة\إعداد خطط استمرارية الأعمال للخدمات الحكومية\إعداد خطط استمرارية الأعمال للخدمات الحكومية\دراسة مشروع (16).docx",
+    r"C:\Users\hosam\OneDrive\سطح المكتب\نطاق العمل\_عروض فنية نماذج ناجحة\عروض فنية نماذج ناجحة\إعداد خطط استمرارية الأعمال للخدمات الحكومية\إعداد خطط استمرارية الأعمال للخدمات الحكومية\دراسة مشروع (16).docx",
+    r"C:\Users\hosam\OneDrive\سطح المكتب\نطاق العمل\_عروض فنية نماذج ناجحة\عروض فنية نماذج ناجحة\إعداد خطط استمرارية الأعمال للخدمات الحكومية\إعداد خطط استمرارية الأعمال للخدمات الحكومية\كراسة الشروط والمواصفات.pdf"
 ]
 
 template_text = load_docx(TEMPLATE_PATH)

@@ -34,9 +34,12 @@ and list each surrounding section in contexts.
 4. Return one instructions entry per unique tag.
 
 Questions (per unique tag):
-- 3-7 questions whose answers come from tender docs, scope of work, BOQ, or project info.
-- Questions seek facts (who, what, when, deliverables), not writing instructions.
-- Prefer Arabic when the template is Arabic.
+- Read the instruction inside @ ... @@ first — questions must gather the facts needed to fulfill \
+that specific instruction.
+- 3-7 questions whose answers supply what the instruction asks for (scope, entities, deliverables, \
+timelines, requirements, etc.).
+- Questions seek facts, not writing instructions — but must align with what the instruction requires.
+- Match the language of the template (Arabic or English).
 """
 
 

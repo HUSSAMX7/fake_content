@@ -44,7 +44,11 @@ class SpanReplacement(BaseModel):
     span_index: int
     tag_id: str
     replacement: str = Field(
-        description="Text replacing the @ ... @@ block only. No @ or @@ markers."
+        description=(
+            "Complete replacement text for the @ ... @@ block. Must follow marker_instruction "
+            "exactly and include every useful fact from question_answers — rich and detailed, "
+            "never summarized. No @ or @@ markers."
+        )
     )
 
 

@@ -48,7 +48,9 @@ class ContentBlock(BaseModel):
             "bullet_item: bullet list entry. heading: section sub-heading."
         )
     )
-    text: str = Field(description="Full text for this block. Rich and detailed, never summarized.")
+    text: str = Field(
+        description="Block text at the depth required by marker_instruction."
+    )
 
 
 class SpanReplacement(BaseModel):
@@ -65,4 +67,22 @@ class SpanReplacement(BaseModel):
 class IntegratorOutput(BaseModel):
     replacements: list[SpanReplacement] = Field(
         description="One replacement per marker span"
+    )
+
+
+class SpanWritingPlan(BaseModel):
+    mode: Literal["single_pass", "sequential_full_depth"] = Field(
+        description=(
+            "single_pass: one writing call; follow marker_instruction depth exactly "
+            "(summary list, short paragraphs, inline field, etc.). "
+            "sequential_full_depth: write each item in a separate call at maximum depth — "
+            "only when marker_instruction explicitly requires rich per-item structure "
+            "(e.g. per-phase goal, من خلال, activities, deliverables)."
+        )
+    )
+    items: list[str] = Field(
+        description=(
+            "Ordered official phase/section names. Required for sequential_full_depth. "
+            "Empty for single_pass."
+        )
     )

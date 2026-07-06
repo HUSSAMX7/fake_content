@@ -122,7 +122,7 @@ def _build_paragraph_xml(
     p_pr_parts: list[str] = []
     if block.type == "heading":
         p_pr_parts.append('<w:pStyle w:val="Heading2"/>')
-    elif block.type in {"numbered_item", "bullet_item"} and snippets["num_pr"]:
+    elif block.type == "numbered_item" and snippets.get("num_pr"):
         p_pr_parts.append(snippets["num_pr"])
 
     if p_pr_parts:

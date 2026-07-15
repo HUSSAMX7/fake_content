@@ -78,13 +78,20 @@ export function ResourcesUploader({
   return (
     <section className="space-y-5" aria-labelledby="resources-heading">
       <div className="space-y-1.5">
-        <h2 id="resources-heading" className="text-lg font-semibold text-foreground">
+        <h2
+          id="resources-heading"
+          tabIndex={-1}
+          className="text-lg font-semibold text-foreground outline-none"
+        >
           ملفات الموارد
         </h2>
         <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground sm:text-[15px]">
           الموارد هي مستندات ومعلومات عن الجهة أو المشروع (كراسة الشروط، نطاق
           العمل، ملاحق…). النموذج يبني محتوى العرض عليها. الصيغ المدعومة: PDF و
           DOCX.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          عند الانتهاء سيظهر لك إجراء للمتابعة إلى التمبلت.
         </p>
       </div>
 
@@ -136,11 +143,7 @@ export function ResourcesUploader({
             </li>
           ))}
         </ul>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          لم يتم اختيار أي ملف بعد. يلزم ملف واحد على الأقل للمتابعة.
-        </p>
-      )}
+      ) : null}
 
       {error ? (
         <p className="text-sm text-destructive" role="alert">

@@ -83,26 +83,44 @@ export function TemplateUploader({
   return (
     <section className="space-y-5" aria-labelledby="template-heading">
       <div className="space-y-1.5">
-        <h2 id="template-heading" className="text-lg font-semibold text-foreground">
+        <h2
+          id="template-heading"
+          tabIndex={-1}
+          className="text-lg font-semibold text-foreground outline-none"
+        >
           تمبلت العرض
         </h2>
+        <p className="max-w-2xl text-sm font-medium leading-relaxed text-brand sm:text-[15px]">
+          يُفضّل الإبقاء على التمبلت الحالي وعدم استبداله.
+        </p>
         <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground sm:text-[15px]">
-          التمبلت الافتراضي محدّد مسبقًا. حمّله واقرأ محتواه قبل استبداله بتمبلت
-          خاص.
+          التمبلت جاهز ومُختبَر ومناسب لبناء العرض الفني. استبدله فقط إذا كان
+          لديك تمبلت خاص مكتوب بنفس أسلوب{" "}
+          <span dir="ltr" className="text-brand">
+            @…@@
+          </span>
+          .
         </p>
       </div>
 
-      <div className="rounded-xl border border-border bg-secondary/30 px-4 py-5 sm:px-5">
+      <div className="rounded-xl border border-brand/35 bg-secondary/30 px-4 py-5 sm:px-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <FileType className="size-5 shrink-0 text-brand" />
             <div className="min-w-0">
-              <p className="text-sm font-medium sm:text-base">
-                {usingDefault ? "التمبلت الافتراضي" : template.name}
-              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-medium sm:text-base">
+                  {usingDefault ? "التمبلت الافتراضي" : template.name}
+                </p>
+                {usingDefault ? (
+                  <span className="rounded-md bg-brand/20 px-2 py-0.5 text-[11px] font-medium text-brand">
+                    موصى به
+                  </span>
+                ) : null}
+              </div>
               <p className="text-xs text-muted-foreground sm:text-sm">
                 {usingDefault
-                  ? "سيُستخدم تمبلت الخادم إن لم ترفع ملفًا آخر"
+                  ? "سيُستخدم تلقائيًا — لا حاجة لرفعه من جديد"
                   : "تمبلت مخصص — سيُرسل مع طلب التوليد"}
               </p>
             </div>
@@ -115,7 +133,7 @@ export function TemplateUploader({
               size="icon-sm"
               disabled={disabled}
               onClick={() => onChange(null)}
-              aria-label="العودة للتمبلت الافتراضي"
+              aria-label="العودة للتمبلت الافتراضي الموصى به"
             >
               <Trash2 className="size-4" />
             </Button>
@@ -132,12 +150,12 @@ export function TemplateUploader({
           onClick={handleDownloadDefault}
         >
           <Download className="size-4" />
-          {downloading ? "جارٍ التحميل..." : "تحميل التمبلت الافتراضي"}
+          {downloading ? "جارٍ التحميل..." : "تحميل للاطلاع"}
         </Button>
 
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           size="lg"
           disabled={disabled}
           onClick={() => {
@@ -147,6 +165,7 @@ export function TemplateUploader({
               inputRef.current?.click();
             }
           }}
+          className="text-muted-foreground"
         >
           <Replace className="size-4" />
           استبدال التمبلت
@@ -171,22 +190,19 @@ export function TemplateUploader({
       <Dialog open={warningOpen} onOpenChange={setWarningOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>تنبيه قبل استبدال التمبلت الافتراضي</DialogTitle>
+            <DialogTitle>تنبيه قبل استبدال التمبلت الموصى به</DialogTitle>
             <DialogDescription className="leading-relaxed text-muted-foreground">
-              انتبه: هذا تمبلت ممتاز. اقرأ محتواه أولًا لتفهم كيف تُكتب تعليمات
-              التمبلت قبل استبداله.
+              يُفضّل الإبقاء على التمبلت الحالي. هذا تمبلت ممتاز ومصمم بعناية —
+              اقرأ محتواه أولًا قبل استبداله لتفهم كيف تُكتب تعليمات{" "}
+              <span dir="ltr">@…@@</span>.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter className="gap-2 sm:justify-start">
-            <Button type="button" onClick={confirmReplaceDefault}>
-              المتابعة والاستبدال
+          <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-start">
+            <Button type="button" variant="outline" onClick={() => setWarningOpen(false)}>
+              الإبقاء على التمبلت
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setWarningOpen(false)}
-            >
-              إلغاء
+            <Button type="button" variant="ghost" onClick={confirmReplaceDefault}>
+              المتابعة والاستبدال
             </Button>
           </DialogFooter>
         </DialogContent>

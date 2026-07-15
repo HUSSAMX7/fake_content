@@ -1,21 +1,26 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { LoaderCircle } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
 
 import { BrandHeader } from "@/components/BrandHeader";
+import { StepRail } from "@/components/StepRail";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import type { AppSection } from "@/lib/sections";
 import { cn } from "@/lib/utils";
 
-export type AppSection = "resources" | "template" | "generate";
+export type { AppSection };
 
 type AppShellProps = {
   activeSection: AppSection;
   onSectionChange: (section: AppSection) => void;
   resourceCount: number;
-  templateHint: string;
+  usingDefaultTemplate: boolean;
+  customTemplateName: string | null;
   readinessHint: string;
+  resourcesComplete: boolean;
+  generateComplete: boolean;
   canGenerate: boolean;
   loading: boolean;
   error: string | null;
@@ -37,8 +42,11 @@ export function AppShell({
   activeSection,
   onSectionChange,
   resourceCount,
-  templateHint,
+  usingDefaultTemplate,
+  customTemplateName,
   readinessHint,
+  resourcesComplete,
+  generateComplete,
   canGenerate,
   loading,
   error,
@@ -47,9 +55,25 @@ export function AppShell({
   children,
 }: AppShellProps) {
   function sectionHint(id: AppSection): string {
-    if (id === "resources") return String(resourceCount);
-    if (id === "template") return templateHint;
+    if (id === "resources") {
+      if (resourcesComplete) return "تم";
+      return String(resourceCount);
+    }
+    if (id === "template") {
+      return usingDefaultTemplate
+        ? "موصى به"
+        : (customTemplateName ?? "مخصص");
+    }
+    if (generateComplete) return "تم";
     return readinessHint;
+  }
+
+  const showShellGenerate = activeSection !== "generate";
+
+  function sectionComplete(id: AppSection): boolean {
+    if (id === "resources") return resourcesComplete;
+    if (id === "template") return true;
+    return generateComplete;
   }
 
   const generateButton = (
@@ -66,7 +90,7 @@ export function AppShell({
           جارٍ التوليد...
         </>
       ) : (
-        "توليد العرض الفني"
+        "ولّد العرض الفني"
       )}
     </Button>
   );
@@ -113,6 +137,7 @@ export function AppShell({
         >
           {NAV_ITEMS.map((item) => {
             const active = activeSection === item.id;
+            const complete = sectionComplete(item.id);
             return (
               <button
                 key={item.id}
@@ -126,6 +151,9 @@ export function AppShell({
                 )}
                 aria-current={active ? "true" : undefined}
               >
+                {complete && !active ? (
+                  <Check className="size-3.5 text-brand" aria-hidden />
+                ) : null}
                 <span>{item.label}</span>
                 <span
                   className={cn(
@@ -148,6 +176,7 @@ export function AppShell({
           <nav className="flex flex-1 flex-col gap-1.5" aria-label="أقسام التطبيق">
             {NAV_ITEMS.map((item) => {
               const active = activeSection === item.id;
+              const complete = sectionComplete(item.id);
               return (
                 <button
                   key={item.id}
@@ -161,7 +190,12 @@ export function AppShell({
                   )}
                   aria-current={active ? "true" : undefined}
                 >
-                  <span>{item.label}</span>
+                  <span className="flex items-center gap-2">
+                    {complete && !active ? (
+                      <Check className="size-3.5 text-brand" aria-hidden />
+                    ) : null}
+                    {item.label}
+                  </span>
                   <span
                     className={cn(
                       "max-w-28 truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal",
@@ -175,28 +209,51 @@ export function AppShell({
             })}
           </nav>
 
-          <div className="mt-auto space-y-3 border-t border-white/10 pt-5">
-            {generateButton}
-            {loadingNote}
-          </div>
+          {showShellGenerate ? (
+            <div className="mt-auto space-y-3 border-t border-white/10 pt-5">
+              {generateButton}
+              {loadingNote}
+            </div>
+          ) : (
+            <div className="mt-auto border-t border-white/10 pt-5">
+              <p className="text-xs leading-relaxed text-white/60">
+                أكمل التوليد من لوحة المحتوى.
+              </p>
+            </div>
+          )}
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <main className="flex-1 px-4 py-6 pb-28 sm:px-8 sm:py-8 lg:px-10 lg:py-10 lg:pb-10">
+        <main
+          className={cn(
+            "flex-1 px-4 py-6 sm:px-8 sm:py-8 lg:px-10 lg:py-10",
+            showShellGenerate ? "pb-28 lg:pb-10" : "pb-10",
+          )}
+        >
           <div className="mx-auto w-full max-w-3xl space-y-8">
-            <p className="text-sm leading-relaxed text-muted-foreground sm:text-base">
-              ارفع موارد المشروع وتمبلت Word، ثم ولّد العرض جاهزًا للتحميل
-            </p>
+            <div className="space-y-4">
+              <p className="text-sm leading-relaxed text-muted-foreground sm:text-base">
+                ارفع موارد المشروع وتمبلت Word، ثم ولّد العرض جاهزًا للتحميل
+              </p>
+              <StepRail
+                activeSection={activeSection}
+                resourcesComplete={resourcesComplete}
+                generateComplete={generateComplete}
+                onSectionChange={onSectionChange}
+              />
+            </div>
             {statusAlerts}
             {children}
           </div>
         </main>
 
-        <div className="sticky bottom-0 z-20 space-y-2 border-t border-white/10 bg-[#111927]/95 px-4 py-4 backdrop-blur lg:hidden">
-          {generateButton}
-          {loadingNote}
-        </div>
+        {showShellGenerate ? (
+          <div className="sticky bottom-0 z-20 space-y-2 border-t border-white/10 bg-[#111927]/95 px-4 py-4 backdrop-blur lg:hidden">
+            {generateButton}
+            {loadingNote}
+          </div>
+        ) : null}
       </div>
     </div>
   );

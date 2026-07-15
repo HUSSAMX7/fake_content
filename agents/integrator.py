@@ -125,7 +125,6 @@ activities, deliverables, or says "تفصيل كل مرحلة" / "غني بال�
 Never use sequential_full_depth for summary or list-style instructions.
 """
 
-
 def _build_span_payloads(
     template_path: str,
     instructions,
@@ -138,11 +137,13 @@ def _build_span_payloads(
     for span in spans:
         tag = match_tag(span["inner"], instructions)
         if tag is None:
-            continue
+            raise RuntimeError(
+                f"No deterministic instruction match for marker {span['span_index']}: {span['inner']!r}"
+            )
 
         answer = answers_by_tag.get(tag.tag_id)
         if answer is None:
-            continue
+            raise RuntimeError(f"Missing research answer for {tag.tag_id}")
 
         payloads.append(
             {
@@ -171,7 +172,25 @@ def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
             HumanMessage(content=f"Marker spans:\n{json.dumps(payloads, ensure_ascii=False, indent=2)}"),
         ]
     )
-    return {item.span_index: item.blocks for item in result.replacements}
+    expected = {payload["span_index"] for payload in payloads}
+    returned = [item.span_index for item in result.replacements]
+    duplicate_ids = {index for index in returned if returned.count(index) > 1}
+    actual = set(returned)
+    if actual != expected or duplicate_ids:
+        raise RuntimeError(
+            "Integrator coverage failure; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}, "
+            f"duplicates={sorted(duplicate_ids)}"
+        )
+    replacements = {item.span_index: item.blocks for item in result.replacements}
+    empty = [
+        index
+        for index, blocks in replacements.items()
+        if not blocks or not any(block.text.strip() for block in blocks)
+    ]
+    if empty:
+        raise RuntimeError(f"Integrator returned blank replacement(s): {empty}")
+    return replacements
 
 
 def _writing_plan(payload: dict) -> SpanWritingPlan:
@@ -207,11 +226,14 @@ def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
     )
 
     try:
-        if not payloads:
-            path = apply_replacements_to_docx(
-                template_path, output_path, spans, {}, unpacked_dir=unpacked_dir
+        expected_span_ids = {span["span_index"] for span in spans}
+        payload_span_ids = {payload["span_index"] for payload in payloads}
+        if payload_span_ids != expected_span_ids:
+            raise RuntimeError(
+                "Marker payload coverage failure; "
+                f"missing={sorted(expected_span_ids - payload_span_ids)}, "
+                f"extra={sorted(payload_span_ids - expected_span_ids)}"
             )
-            return {"output_path": path}
 
         inline_payloads = [p for p in payloads if p["inline"]]
         block_payloads = [p for p in payloads if not p["inline"]]
@@ -223,6 +245,12 @@ def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
         for payload in block_payloads:
             replacements[payload["span_index"]] = _generate_blocks_for_payload(payload)
 
+        if set(replacements) != expected_span_ids:
+            raise RuntimeError(
+                "Replacement coverage failure; "
+                f"missing={sorted(expected_span_ids - set(replacements))}"
+            )
+
         path = apply_replacements_to_docx(
             template_path,
             output_path,
@@ -230,6 +258,14 @@ def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
             replacements,
             unpacked_dir=unpacked_dir,
         )
+        verify_dir, _, remaining = prepare_template(path)
+        try:
+            if remaining:
+                raise RuntimeError(
+                    f"Output still contains marker spans: {[span['span_index'] for span in remaining]}"
+                )
+        finally:
+            verify_dir.cleanup()
         return {"output_path": path}
     finally:
         temp_dir.cleanup()

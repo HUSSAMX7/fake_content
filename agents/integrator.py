@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from docx_integrator import apply_replacements_to_docx, match_tag, prepare_template
 from graph_state import GraphState
-from llm_config import llm
+from llm_config import invoke_structured
 from schemas import ContentBlock, IntegratorOutput, SpanWritingPlan, TagAnswerOutput
 
 SYSTEM_PROMPT = """\
@@ -166,11 +166,12 @@ def _build_span_payloads(
 
 
 def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
-    result = llm.with_structured_output(IntegratorOutput).invoke(
+    result = invoke_structured(
+        IntegratorOutput,
         [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=f"Marker spans:\n{json.dumps(payloads, ensure_ascii=False, indent=2)}"),
-        ]
+        ],
     )
     expected = {payload["span_index"] for payload in payloads}
     returned = [item.span_index for item in result.replacements]
@@ -197,12 +198,17 @@ def _writing_plan(payload: dict) -> SpanWritingPlan:
     if payload["inline"]:
         return SpanWritingPlan(mode="single_pass", items=[])
 
-    return llm.with_structured_output(SpanWritingPlan).invoke(
-        [
-            SystemMessage(content=WRITING_PLAN_PROMPT),
-            HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
-        ]
-    )
+    try:
+        return invoke_structured(
+            SpanWritingPlan,
+            [
+                SystemMessage(content=WRITING_PLAN_PROMPT),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
+            ],
+        )
+    except Exception:
+        # Prefer completing generation over failing the whole request on a planning parse error.
+        return SpanWritingPlan(mode="single_pass", items=[])
 
 
 def _generate_blocks_for_payload(payload: dict) -> list[ContentBlock]:

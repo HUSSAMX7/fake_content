@@ -3,7 +3,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from graph_state import GraphState
-from llm_config import llm
+from llm_config import invoke_structured
 from schemas import InstructionItem, TemplatePlannerOutput
 
 SYSTEM_PROMPT = """\
@@ -67,11 +67,12 @@ def plan_template(state: GraphState) -> dict:
     spans = state.get("marker_spans")
     if not spans:
         # Compatibility for callers outside the production pipeline.
-        result = llm.with_structured_output(TemplatePlannerOutput).invoke(
+        result = invoke_structured(
+            TemplatePlannerOutput,
             [
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=f"Template:\n\n{state['template_text']}"),
-            ]
+            ],
         )
         return {"instructions": result.instructions}
 
@@ -88,7 +89,8 @@ def plan_template(state: GraphState) -> dict:
         ensure_ascii=False,
         indent=2,
     )
-    result = llm.with_structured_output(TemplatePlannerOutput).invoke(
+    result = invoke_structured(
+        TemplatePlannerOutput,
         [
             SystemMessage(
                 content=(
@@ -99,7 +101,7 @@ def plan_template(state: GraphState) -> dict:
                 )
             ),
             HumanMessage(content=f"Marker inventory:\n{inventory_json}"),
-        ]
+        ],
     )
     returned = {" ".join(item.instruction.split()): item for item in result.instructions}
     expected = {" ".join(item.instruction.split()) for item in inventory}

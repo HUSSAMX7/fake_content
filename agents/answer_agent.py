@@ -3,7 +3,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from graph_state import GraphState
-from llm_config import llm
+from llm_config import invoke_structured
 from schemas import AllTagsAnswerOutput
 
 SYSTEM_PROMPT = """\
@@ -51,7 +51,8 @@ def fill_answers(state: GraphState) -> dict:
         ensure_ascii=False,
         indent=2,
     )
-    result = llm.with_structured_output(AllTagsAnswerOutput).invoke(
+    result = invoke_structured(
+        AllTagsAnswerOutput,
         [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
@@ -60,6 +61,6 @@ def fill_answers(state: GraphState) -> dict:
                     f"--- Source documents ---\n\n{state['tender_text']}"
                 )
             ),
-        ]
+        ],
     )
     return {"answers": result.answers}

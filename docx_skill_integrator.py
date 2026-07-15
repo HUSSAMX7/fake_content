@@ -1,28 +1,35 @@
-"""DOCX integration via the bundled docx skill: unpack → edit XML → pack."""
+"""Safe, deterministic replacement of ``@instruction@@`` markers in DOCX files.
+
+The implementation deliberately patches only the XML parts containing markers.  It
+does not rebuild a document through python-docx, merge runs, or normalise every XML
+part: all of those approaches can silently remove text boxes, content controls, or
+unrelated formatting from a rich Word template.
+"""
 
 from __future__ import annotations
 
 import copy
 import re
-import sys
 import tempfile
-from lxml import etree
-from difflib import SequenceMatcher
+import zipfile
+from collections import defaultdict
 from pathlib import Path
+
+from lxml import etree as ET
 
 from schemas import ContentBlock, InstructionItem
 
-DOCX_OFFICE_DIR = Path(__file__).resolve().parent / "docx" / "scripts" / "office"
-if str(DOCX_OFFICE_DIR) not in sys.path:
-    sys.path.insert(0, str(DOCX_OFFICE_DIR))
-
-from pack import pack as skill_pack  # noqa: E402
-from unpack import unpack as skill_unpack  # noqa: E402
-
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-ET = etree
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+V_NS = "urn:schemas-microsoft-com:vml"
+XML_NS = "http://www.w3.org/XML/1998/namespace"
+ET.register_namespace("w", W_NS)
 
-_BULLET_PREFIX = re.compile(r"^[\s•●○▪▫\-–—*]+")
+_STORY_PART_RE = re.compile(
+    r"^word/(?:document|header\d+|footer\d+|footnotes|endnotes)\.xml$"
+)
+_MARKER_RE = re.compile(r"@(?P<inner>.+?)@@", re.DOTALL)
+_BULLET_PREFIX = re.compile(r"^[\s•◦▪▫\-–—*]+")
 _NUMBER_PREFIX = re.compile(r"^[\s\d]+[\.\)\-–—:]+[\s]*")
 
 
@@ -31,7 +38,7 @@ def _tag(local: str) -> str:
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lstrip("@").strip())
+    return re.sub(r"\s+", " ", text.strip())
 
 
 def _normalize_block_text(block: ContentBlock) -> str:
@@ -43,53 +50,140 @@ def _normalize_block_text(block: ContentBlock) -> str:
     return text
 
 
-def _xml_escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+def _nearest_paragraph(node: ET.Element) -> ET.Element | None:
+    current: ET.Element | None = node
+    while current is not None:
+        if current.tag == _tag("p"):
+            return current
+        current = current.getparent()
+    return None
+
+
+def _paragraph_text_nodes(paragraph: ET.Element) -> list[ET.Element]:
+    """Return text nodes owned by this paragraph, excluding nested text boxes.
+
+    A drawing can contain another ``w:p``.  ``paragraph.iter(w:t)`` incorrectly
+    sees that nested paragraph too, which was the source of duplicate markers and
+    accidental deletion of entire text boxes in the previous implementation.
+    """
+
+    return [
+        node
+        for node in paragraph.iter(_tag("t"))
+        if _nearest_paragraph(node) is paragraph
+    ]
 
 
 def _paragraph_text(paragraph: ET.Element) -> str:
-    parts: list[str] = []
-    for node in paragraph.iter(_tag("t")):
-        if node.text:
-            parts.append(node.text)
-    return "".join(parts)
+    return "".join(node.text or "" for node in _paragraph_text_nodes(paragraph))
 
 
-def _element_xml(element: ET.Element | None) -> str:
-    if element is None:
-        return ""
-    return ET.tostring(element, encoding="unicode")
+def _story_parts(unpacked_dir: Path) -> list[str]:
+    return sorted(
+        path.relative_to(unpacked_dir).as_posix()
+        for path in unpacked_dir.rglob("*.xml")
+        if _STORY_PART_RE.fullmatch(path.relative_to(unpacked_dir).as_posix())
+    )
 
 
-def _extract_template_snippets(root: ET.Element) -> dict[str, str]:
-    p_pr_xml = ""
-    r_pr_xml = ""
-    num_pr_xml = ""
+def _find_marker_spans_in_root(root: ET.Element, part_name: str) -> list[dict]:
+    paragraphs = root.findall(f".//{_tag('p')}")
+    texts = [_paragraph_text(paragraph) for paragraph in paragraphs]
 
-    for paragraph in root.iter(_tag("p")):
-        if not p_pr_xml:
-            p_pr = paragraph.find(_tag("pPr"))
-            if p_pr is not None:
-                p_pr_xml = _element_xml(p_pr)
-        if not r_pr_xml:
-            for run in paragraph.findall(_tag("r")):
-                r_pr = run.find(_tag("rPr"))
-                if r_pr is not None:
-                    r_pr_xml = _element_xml(r_pr)
-                    break
-        if not num_pr_xml:
-            num_pr = paragraph.find(f".//{_tag('numPr')}")
-            if num_pr is not None:
-                num_pr_xml = _element_xml(num_pr)
-        if p_pr_xml and r_pr_xml and num_pr_xml:
-            break
+    # The newline is only a locator separator; it allows a marker to cross normal
+    # paragraphs while making its exact source paragraphs unambiguous.
+    starts: list[int] = []
+    stream_parts: list[str] = []
+    offset = 0
+    for index, text in enumerate(texts):
+        starts.append(offset)
+        stream_parts.append(text)
+        offset += len(text)
+        if index != len(texts) - 1:
+            stream_parts.append("\n")
+            offset += 1
+    stream = "".join(stream_parts)
 
-    return {"p_pr": p_pr_xml, "r_pr": r_pr_xml, "num_pr": num_pr_xml}
+    def paragraph_at(position: int) -> tuple[int, int]:
+        for index in range(len(texts) - 1, -1, -1):
+            if position >= starts[index]:
+                local = position - starts[index]
+                if local <= len(texts[index]):
+                    return index, local
+        raise ValueError(f"Marker position {position} is outside {part_name}")
+
+    spans: list[dict] = []
+    for match in _MARKER_RE.finditer(stream):
+        start, start_offset = paragraph_at(match.start())
+        # End is exclusive; locate its final character, then convert back to an
+        # exclusive offset inside that paragraph.
+        end, final_offset = paragraph_at(match.end() - 1)
+        end_offset = final_offset + 1
+        before = texts[start][:start_offset]
+        after = texts[end][end_offset:]
+        spans.append(
+            {
+                "part": part_name,
+                "start": start,
+                "end": end,
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+                # ``inner`` is the semantic instruction used for matching; the
+                # raw value is retained so a harmless authoring space before @@
+                # does not make the surgical patch reject its own marker.
+                "inner": match.group("inner").strip(),
+                "raw_inner": match.group("inner"),
+                "before": before,
+                "after": after,
+                # A marker sharing text with its paragraph must always be patched
+                # in place. Marker-only paragraphs can become blocks if the writer
+                # actually returns multiple structured blocks.
+                "inline": start == end
+                and (
+                    bool(before.strip() or after.strip())
+                    # A data-bound content control is a field even when it is the
+                    # only visible text in its paragraph. Asking the writer for a
+                    # multi-paragraph section here caused Word to reject/revert it.
+                    or _data_binding_for_paragraph(paragraphs[start]) is not None
+                ),
+            }
+        )
+    return spans
+
+
+def find_marker_spans_xml(document_xml: Path) -> list[dict]:
+    """Find every marker in one XML story part.
+
+    Kept as a public compatibility function for callers that supply document.xml.
+    """
+
+    root = ET.parse(str(document_xml)).getroot()
+    spans = _find_marker_spans_in_root(root, "word/document.xml")
+    for index, span in enumerate(spans):
+        span["span_index"] = index
+    return spans
+
+
+def find_marker_spans_in_unpacked(unpacked_dir: Path) -> list[dict]:
+    """Inventory body, headers, footers, notes, tables, and text boxes."""
+
+    spans: list[dict] = []
+    for part_name in _story_parts(unpacked_dir):
+        root = ET.parse(str(unpacked_dir / part_name)).getroot()
+        spans.extend(_find_marker_spans_in_root(root, part_name))
+    for index, span in enumerate(spans):
+        span["span_index"] = index
+    return spans
+
+
+def match_tag(inner_text: str, instructions: list[InstructionItem]) -> InstructionItem | None:
+    """Exact matching only. Fuzzy matching can send content to the wrong slot."""
+
+    expected = _normalize(inner_text)
+    for tag in instructions:
+        if _normalize(tag.instruction) == expected:
+            return tag
+    return None
 
 
 def _inline_text(blocks: list[ContentBlock]) -> str:
@@ -97,268 +191,302 @@ def _inline_text(blocks: list[ContentBlock]) -> str:
 
 
 def _should_render_as_blocks(span: dict, blocks: list[ContentBlock]) -> bool:
-    if not span["inline"]:
-        return True
-    if len(blocks) > 1:
-        return True
-    if blocks and blocks[0].type != "paragraph":
-        return True
-    return False
+    if not blocks:
+        raise ValueError(f"Empty replacement for marker {span['span_index']}")
+    if span["inline"]:
+        return False
+    return len(blocks) > 1 or blocks[0].type != "paragraph"
 
 
-def _build_run_xml(text: str, r_pr_xml: str) -> str:
-    escaped = _xml_escape(text)
-    space = ' xml:space="preserve"' if text.startswith(" ") or text.endswith(" ") else ""
-    if r_pr_xml:
-        return f"<w:r>{r_pr_xml}<w:t{space}>{escaped}</w:t></w:r>"
-    return f"<w:r><w:t{space}>{escaped}</w:t></w:r>"
-
-
-def _build_paragraph_xml(
-    text: str,
-    block: ContentBlock,
-    snippets: dict[str, str],
-) -> str:
-    p_pr_parts: list[str] = []
-    if block.type == "heading":
-        p_pr_parts.append('<w:pStyle w:val="Heading2"/>')
-    elif block.type == "numbered_item" and snippets.get("num_pr"):
-        p_pr_parts.append(snippets["num_pr"])
-
-    if p_pr_parts:
-        p_pr_xml = "<w:pPr>" + "".join(p_pr_parts) + "</w:pPr>"
-    elif snippets["p_pr"]:
-        p_pr_xml = snippets["p_pr"]
+def _set_text(node: ET.Element, text: str) -> None:
+    node.text = text
+    if text.startswith(" ") or text.endswith(" "):
+        node.set(f"{{{XML_NS}}}space", "preserve")
     else:
-        p_pr_xml = ""
-
-    return f"<w:p>{p_pr_xml}{_build_run_xml(text, snippets['r_pr'])}</w:p>"
+        node.attrib.pop(f"{{{XML_NS}}}space", None)
 
 
-def _build_blocks_xml(
-    span: dict,
-    blocks: list[ContentBlock],
-    snippets: dict[str, str],
-) -> str:
-    if not _should_render_as_blocks(span, blocks):
-        return _xml_escape(_inline_text(blocks))
+def _text_position(nodes: list[ET.Element], offset: int) -> tuple[int, int]:
+    """Map a paragraph character offset to a text-node index and local offset."""
 
-    parts: list[str] = []
-    if span["before"].strip():
-        parts.append(
-            _build_paragraph_xml(span["before"], ContentBlock(type="paragraph", text=span["before"]), snippets)
-        )
-
-    start_index = 0
-    if not span["before"].strip() and blocks:
-        parts.append(_build_paragraph_xml(_normalize_block_text(blocks[0]), blocks[0], snippets))
-        start_index = 1
-
-    for block in blocks[start_index:]:
-        parts.append(_build_paragraph_xml(_normalize_block_text(block), block, snippets))
-
-    if span["after"].strip():
-        if parts:
-            last = parts[-1]
-            if last.endswith("</w:p>"):
-                parts[-1] = last[:-6] + _build_run_xml(span["after"], snippets["r_pr"]) + "</w:p>"
-            else:
-                parts.append(
-                    _build_paragraph_xml(span["after"], ContentBlock(type="paragraph", text=span["after"]), snippets)
-                )
-        else:
-            parts.append(
-                _build_paragraph_xml(span["after"], ContentBlock(type="paragraph", text=span["after"]), snippets)
-            )
-
-    return "".join(parts)
+    consumed = 0
+    for index, node in enumerate(nodes):
+        length = len(node.text or "")
+        node_end = consumed + length
+        if offset < node_end:
+            return index, offset - consumed
+        if offset == node_end:
+            # A marker immediately after a normal run can start in a data-bound
+            # content control.  Selecting the preceding run would write the
+            # replacement beside the control, then Word refreshes the control
+            # from its document property and visibly duplicates the value.
+            if index + 1 < len(nodes):
+                return index + 1, 0
+            return index, length
+        consumed = node_end
+    if nodes and offset == consumed:
+        return len(nodes) - 1, len(nodes[-1].text or "")
+    raise ValueError("Marker offset cannot be mapped to a Word text node")
 
 
-def find_marker_spans_xml(document_xml: Path) -> list[dict]:
-    root = ET.parse(document_xml).getroot()
+def _replace_inline(root: ET.Element, span: dict, blocks: list[ContentBlock]) -> None:
     paragraphs = root.findall(f".//{_tag('p')}")
-
-    spans: list[dict] = []
-    index = 0
-    while index < len(paragraphs):
-        text = _paragraph_text(paragraphs[index])
-        if "@" not in text:
-            index += 1
-            continue
-
-        start = index
-        combined = text
-        while "@@" not in combined and index + 1 < len(paragraphs):
-            index += 1
-            combined += "\n" + _paragraph_text(paragraphs[index])
-
-        if "@@" not in combined:
-            index += 1
-            continue
-
-        match = re.search(r"@(.*?)(@@)", combined, re.DOTALL)
-        if not match:
-            index += 1
-            continue
-
-        spans.append(
-            {
-                "span_index": len(spans),
-                "start": start,
-                "end": index,
-                "inner": match.group(1).strip(),
-                "before": combined[: match.start()],
-                "after": combined[match.end() :],
-                "inline": bool(combined[: match.start()].strip() or combined[match.end() :].strip()),
-            }
+    if span["start"] != span["end"]:
+        raise ValueError("Inline marker cannot cross paragraphs")
+    paragraph = paragraphs[span["start"]]
+    nodes = _paragraph_text_nodes(paragraph)
+    source_text = "".join(node.text or "" for node in nodes)
+    token = f"@{span.get('raw_inner', span['inner'])}@@"
+    start = span["start_offset"]
+    end = span["end_offset"]
+    if source_text[start:end] != token:
+        raise ValueError(
+            f"Marker source changed before replacement: {span['part']}#{span['span_index']}"
         )
-        index += 1
-    return spans
 
-
-def match_tag(inner_text: str, instructions: list[InstructionItem]) -> InstructionItem | None:
-    norm_inner = _normalize(inner_text)
-    best: InstructionItem | None = None
-    best_score = 0.0
-
-    for tag in instructions:
-        norm_instruction = _normalize(tag.instruction)
-        score = SequenceMatcher(None, norm_inner, norm_instruction).ratio()
-        if norm_inner in norm_instruction or norm_instruction in norm_inner:
-            score = max(score, 0.9)
-        if score > best_score:
-            best_score = score
-            best = tag
-
-    return best if best_score >= 0.5 else None
-
-
-def _build_parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
-    parent_map: dict[ET.Element, ET.Element] = {}
-    for node in root.iter():
-        for child in node:
-            parent_map[child] = node
-    return parent_map
-
-
-def _parse_paragraph_elements(fragment: str) -> list[ET.Element]:
-    fragment = fragment.strip()
-    if not fragment:
-        return []
-    wrapped = f'<root xmlns:w="{W_NS}">{fragment}</root>'
-    return list(ET.fromstring(wrapped))
-
-
-def _copy_p_pr(source: ET.Element, target: ET.Element) -> None:
-    source_ppr = source.find(_tag("pPr"))
-    if source_ppr is None:
+    replacement = _inline_text(blocks)
+    if not replacement:
+        raise ValueError(f"Blank replacement for marker {span['span_index']}")
+    first_index, first_local = _text_position(nodes, start)
+    last_index, last_local = _text_position(nodes, end)
+    first_text = nodes[first_index].text or ""
+    last_text = nodes[last_index].text or ""
+    if first_index == last_index:
+        _set_text(nodes[first_index], first_text[:first_local] + replacement + first_text[last_local:])
         return
-    target_ppr = target.find(_tag("pPr"))
-    if target_ppr is not None:
-        target.remove(target_ppr)
-    target.insert(0, copy.deepcopy(source_ppr))
+
+    _set_text(nodes[first_index], first_text[:first_local] + replacement)
+    for index in range(first_index + 1, last_index):
+        _set_text(nodes[index], "")
+    _set_text(nodes[last_index], last_text[last_local:])
 
 
-def _inline_replacement_text(span: dict, blocks: list[ContentBlock]) -> str:
-    parts: list[str] = []
-    if span["before"]:
-        parts.append(span["before"])
-    parts.append(_inline_text(blocks))
-    if span["after"]:
-        parts.append(span["after"])
-    return "".join(parts)
+def _data_binding_for_paragraph(paragraph: ET.Element) -> dict[str, str] | None:
+    """Return a Word content-control binding inherited by this paragraph."""
+
+    # Word can place the SDT inside a paragraph, as well as around the paragraph.
+    # The marker text is then a descendant of the paragraph rather than vice versa.
+    nested = paragraph.find(f".//{_tag('dataBinding')}")
+    if nested is not None:
+        return dict(nested.attrib)
+    current: ET.Element | None = paragraph
+    while current is not None:
+        if current.tag == _tag("sdt"):
+            binding = current.find(f"./{_tag('sdtPr')}/{_tag('dataBinding')}")
+            if binding is not None:
+                return dict(binding.attrib)
+        current = current.getparent()
+    return None
 
 
-def _replace_span_in_tree(
+def _record_data_binding_update(
+    paragraph: ET.Element,
+    value: str,
+    updates: dict[tuple[str, str, str], str],
+) -> None:
+    """Keep a data-bound content control from reverting when Word opens it.
+
+    Word may refresh a content control from docProps/core.xml or docProps/app.xml
+    during export/open. Updating only w:sdtContent therefore looks correct in XML
+    but visibly reverts to the original marker in Word.
+    """
+
+    binding = _data_binding_for_paragraph(paragraph)
+    if binding is None:
+        return
+    xpath = binding.get(_tag("xpath"))
+    prefix_mappings = binding.get(_tag("prefixMappings"), "")
+    store_item_id = binding.get(_tag("storeItemID"), "")
+    if not xpath:
+        raise ValueError("Data-bound content control has no XPath")
+    key = (store_item_id, xpath, prefix_mappings)
+    existing = updates.get(key)
+    if existing is not None and existing != value:
+        raise ValueError(f"Conflicting replacements for data-bound field {xpath}")
+    updates[key] = value
+
+
+def _binding_namespaces(prefix_mappings: str) -> dict[str, str]:
+    return dict(re.findall(r"xmlns:([\w.-]+)='([^']+)'", prefix_mappings))
+
+
+def _apply_data_binding_updates(
+    unpacked_dir: Path,
+    updates: dict[tuple[str, str, str], str],
+) -> None:
+    if not updates:
+        return
+    property_parts = [unpacked_dir / "docProps" / "core.xml", unpacked_dir / "docProps" / "app.xml"]
+    unresolved = set(updates)
+    for property_part in property_parts:
+        if not property_part.exists():
+            continue
+        tree = ET.parse(str(property_part))
+        root = tree.getroot()
+        changed = False
+        for key, value in updates.items():
+            _, xpath, mappings = key
+            try:
+                matches = root.xpath(xpath, namespaces=_binding_namespaces(mappings))
+            except ET.XPathError as error:
+                raise ValueError(f"Invalid content-control binding XPath {xpath!r}") from error
+            if not matches:
+                continue
+            for match in matches:
+                if not isinstance(match, ET._Element):
+                    raise ValueError(f"Unsupported non-element content-control binding {xpath!r}")
+                match.text = value
+            unresolved.discard(key)
+            changed = True
+        if changed:
+            tree.write(str(property_part), xml_declaration=True, encoding="UTF-8", standalone=True)
+    if unresolved:
+        paths = sorted({key[1] for key in unresolved})
+        raise ValueError(f"Could not resolve content-control binding(s): {paths}")
+
+
+def _contains_preserve_only_content(paragraph: ET.Element) -> bool:
+    protected = (_tag("drawing"), _tag("pict"), _tag("sdt"), _tag("bookmarkStart"), _tag("bookmarkEnd"))
+    return any(paragraph.find(f".//{tag}") is not None for tag in protected)
+
+
+def _first_run_properties(paragraph: ET.Element) -> ET.Element | None:
+    for run in paragraph.iter(_tag("r")):
+        if _nearest_paragraph(run) is paragraph:
+            properties = run.find(_tag("rPr"))
+            return copy.deepcopy(properties) if properties is not None else None
+    return None
+
+
+def _detach_floating_runs(paragraph: ET.Element) -> ET.Element | None:
+    """Move floating page furniture into a standalone anchor paragraph.
+
+    Some templates put an ``@...@@`` marker and an anchored banner in the same
+    paragraph.  Expanding that marker into several paragraphs while leaving the
+    anchor on the first paragraph makes the later text flow underneath the
+    banner.  Detaching only shape-only runs lets us reinsert the unchanged
+    anchor after all generated content; its geometry and Choice/Fallback payload
+    stay byte-for-byte equivalent at the element level.
+    """
+
+    wp_anchor = f"{{{WP_NS}}}anchor"
+    v_shape = f"{{{V_NS}}}shape"
+    floating_runs: list[ET.Element] = []
+    for child in list(paragraph):
+        if child.tag != _tag("r"):
+            continue
+        has_floating_shape = (
+            child.find(f".//{wp_anchor}") is not None
+            or child.find(f".//{v_shape}") is not None
+        )
+        owns_visible_text = any(
+            _nearest_paragraph(node) is paragraph and bool((node.text or "").strip())
+            for node in child.iter(_tag("t"))
+        )
+        if has_floating_shape and not owns_visible_text:
+            floating_runs.append(child)
+
+    if not floating_runs:
+        return None
+
+    anchor_paragraph = ET.Element(_tag("p"))
+    p_pr = paragraph.find(_tag("pPr"))
+    if p_pr is not None:
+        anchor_paragraph.append(copy.deepcopy(p_pr))
+    for run in floating_runs:
+        paragraph.remove(run)
+        anchor_paragraph.append(run)
+    return anchor_paragraph
+
+
+def _set_paragraph_style(p_pr: ET.Element, style_name: str) -> None:
+    style = p_pr.find(_tag("pStyle"))
+    if style is None:
+        style = ET.Element(_tag("pStyle"))
+        p_pr.insert(0, style)
+    style.set(_tag("val"), style_name)
+
+
+def _generated_paragraph(source: ET.Element, block: ContentBlock) -> ET.Element:
+    paragraph = ET.Element(_tag("p"))
+    source_ppr = source.find(_tag("pPr"))
+    if source_ppr is not None:
+        p_pr = copy.deepcopy(source_ppr)
+        # New structural headings need a heading style, but existing heading
+        # placeholders are patched inline and therefore keep their exact style.
+        if block.type == "heading":
+            _set_paragraph_style(p_pr, "Heading2")
+        paragraph.append(p_pr)
+    elif block.type == "heading":
+        p_pr = ET.Element(_tag("pPr"))
+        _set_paragraph_style(p_pr, "Heading2")
+        paragraph.append(p_pr)
+
+    run = ET.SubElement(paragraph, _tag("r"))
+    properties = _first_run_properties(source)
+    if properties is not None:
+        run.append(properties)
+    text = _normalize_block_text(block)
+    text_node = ET.SubElement(run, _tag("t"))
+    _set_text(text_node, text)
+    return paragraph
+
+
+def _replace_block(root: ET.Element, span: dict, blocks: list[ContentBlock]) -> None:
+    paragraphs = root.findall(f".//{_tag('p')}")
+    targets = paragraphs[span["start"] : span["end"] + 1]
+    if not targets:
+        raise ValueError("Marker target paragraph is missing")
+    if span["start_offset"] != 0 or span["end_offset"] != len(_paragraph_text(targets[-1])):
+        raise ValueError("Block marker has surrounding text and must be patched inline")
+    parent = targets[0].getparent()
+    if parent is None or any(paragraph.getparent() is not parent for paragraph in targets):
+        raise ValueError("Block marker crosses Word containers")
+    if any(_contains_preserve_only_content(paragraph) for paragraph in targets):
+        raise ValueError("Block marker contains drawing, bookmark, or content control")
+
+    children = list(parent)
+    indices = [children.index(paragraph) for paragraph in targets]
+    if indices != list(range(indices[0], indices[0] + len(indices))):
+        raise ValueError("Block marker paragraphs are not consecutive siblings")
+    new_paragraphs = [_generated_paragraph(targets[0], block) for block in blocks]
+    if not new_paragraphs:
+        raise ValueError(f"Blank replacement for marker {span['span_index']}")
+    for paragraph in targets:
+        parent.remove(paragraph)
+    for offset, paragraph in enumerate(new_paragraphs):
+        parent.insert(indices[0] + offset, paragraph)
+
+
+def _replace_block_preserving_source_paragraph(
     root: ET.Element,
     span: dict,
     blocks: list[ContentBlock],
-    snippets: dict[str, str],
 ) -> None:
+    """Expand a marker without deleting an anchored drawing or bookmark.
+
+    The first block is written into the existing paragraph, retaining its drawing,
+    content-control metadata, or bookmark. Remaining blocks are cloned as normal
+    sibling paragraphs after it. This is the safe path for a marker-only paragraph
+    that contains page furniture or navigation anchors.
+    """
+
+    if span["start"] != span["end"]:
+        raise ValueError("Protected block marker crosses paragraphs")
     paragraphs = root.findall(f".//{_tag('p')}")
-    parent_map = _build_parent_map(root)
-    start = span["start"]
-    end = span["end"]
-    if start >= len(paragraphs):
-        return
-
-    targets = paragraphs[start : end + 1]
-    first = targets[0]
-    parent = parent_map.get(first)
+    source = paragraphs[span["start"]]
+    if span["start_offset"] != 0 or span["end_offset"] != len(_paragraph_text(source)):
+        raise ValueError("Protected block marker has surrounding text")
+    _replace_inline(root, span, [blocks[0]])
+    anchor_paragraph = _detach_floating_runs(source)
+    parent = source.getparent()
     if parent is None:
-        return
-
-    children = list(parent)
-    try:
-        indices = [children.index(paragraph) for paragraph in targets]
-    except ValueError:
-        return
-    if len(indices) != len(targets):
-        return
-
-    insert_at = min(indices)
-
-    if _should_render_as_blocks(span, blocks):
-        new_elements = _parse_paragraph_elements(_build_blocks_xml(span, blocks, snippets))
-    else:
-        text = _inline_replacement_text(span, blocks)
-        block = ContentBlock(type="paragraph", text=text)
-        new_elements = _parse_paragraph_elements(_build_paragraph_xml(text, block, snippets))
-        if new_elements:
-            _copy_p_pr(first, new_elements[0])
-
-    if not new_elements:
-        return
-
-    for paragraph in targets:
-        parent.remove(paragraph)
-    for offset, element in enumerate(new_elements):
-        parent.insert(insert_at + offset, element)
-
-
-def _write_document_xml(document_xml: Path, tree: etree._ElementTree) -> None:
-    tree.write(
-        str(document_xml),
-        xml_declaration=True,
-        encoding="UTF-8",
-        standalone=True,
-    )
-
-
-def _repair_broken_relationships(unpacked_dir: Path) -> None:
-    rels_path = unpacked_dir / "word" / "_rels" / "document.xml.rels"
-    document_xml = unpacked_dir / "word" / "document.xml"
-    if not rels_path.exists():
-        return
-
-    text = rels_path.read_text(encoding="utf-8")
-    removed_ids = re.findall(
-        r'<Relationship\s+Id="([^"]+)"[^>]*Target="file:///[^"]*"[^>]*/>',
-        text,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r'<Relationship[^>]*Target="file:///[^"]*"[^>]*/>\s*',
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if cleaned != text:
-        rels_path.write_text(cleaned, encoding="utf-8")
-
-    if not removed_ids or not document_xml.exists():
-        return
-
-    doc_text = document_xml.read_text(encoding="utf-8")
-    updated = doc_text
-    for rel_id in removed_ids:
-        updated = re.sub(
-            rf'(<w:hyperlink[^>]*)\s+r:id="{re.escape(rel_id)}"',
-            r"\1",
-            updated,
-        )
-    if updated != doc_text:
-        document_xml.write_text(updated, encoding="utf-8")
+        raise ValueError("Protected block marker has no parent container")
+    insert_at = list(parent).index(source) + 1
+    for offset, block in enumerate(blocks[1:]):
+        parent.insert(insert_at + offset, _generated_paragraph(source, block))
+    if anchor_paragraph is not None:
+        parent.insert(insert_at + len(blocks) - 1, anchor_paragraph)
 
 
 def _apply_replacements_to_unpacked(
@@ -366,24 +494,37 @@ def _apply_replacements_to_unpacked(
     spans: list[dict],
     replacements: dict[int, list[ContentBlock]],
 ) -> None:
-    document_xml = unpacked_dir / "word" / "document.xml"
-    parser = etree.XMLParser(remove_blank_text=False)
-    tree = etree.parse(str(document_xml), parser)
-    root = tree.getroot()
-    snippets = _extract_template_snippets(root)
-
     span_lookup = {span["span_index"]: span for span in spans}
-    ordered_spans = sorted(
-        (span_lookup[index] for index in replacements if index in span_lookup),
-        key=lambda item: item["start"],
-        reverse=True,
-    )
-    for span in ordered_spans:
-        blocks = replacements[span["span_index"]]
-        _replace_span_in_tree(root, span, blocks, snippets)
+    unknown = set(replacements) - set(span_lookup)
+    if unknown:
+        raise ValueError(f"Replacements reference unknown marker spans: {sorted(unknown)}")
 
-    _write_document_xml(document_xml, tree)
-    _repair_broken_relationships(unpacked_dir)
+    by_part: dict[str, list[dict]] = defaultdict(list)
+    for index in replacements:
+        by_part[span_lookup[index]["part"]].append(span_lookup[index])
+
+    binding_updates: dict[tuple[str, str, str], str] = {}
+    for part_name, part_spans in by_part.items():
+        part_path = unpacked_dir / part_name
+        parser = ET.XMLParser(remove_blank_text=False)
+        tree = ET.parse(str(part_path), parser)
+        root = tree.getroot()
+        for span in sorted(part_spans, key=lambda item: (item["start"], item["start_offset"]), reverse=True):
+            blocks = replacements[span["span_index"]]
+            paragraphs = root.findall(f".//{_tag('p')}")
+            marker_paragraph = paragraphs[span["start"]]
+            binding = _data_binding_for_paragraph(marker_paragraph)
+            if _should_render_as_blocks(span, blocks):
+                targets = paragraphs[span["start"] : span["end"] + 1]
+                if any(_contains_preserve_only_content(paragraph) for paragraph in targets):
+                    _replace_block_preserving_source_paragraph(root, span, blocks)
+                else:
+                    _replace_block(root, span, blocks)
+            else:
+                _record_data_binding_update(marker_paragraph, _inline_text(blocks), binding_updates)
+                _replace_inline(root, span, blocks)
+        tree.write(str(part_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+    _apply_data_binding_updates(unpacked_dir, binding_updates)
 
 
 def _save_docx_with_fallback(output_path: str) -> str:
@@ -401,27 +542,21 @@ def _save_docx_with_fallback(output_path: str) -> str:
 
 
 def unpack_template(template_path: str, unpacked_dir: Path) -> None:
-    _, message = skill_unpack(template_path, str(unpacked_dir))
-    if "Error" in message:
-        raise RuntimeError(message)
+    """Extract without pretty-printing or merging runs in unrelated XML parts."""
+
+    with zipfile.ZipFile(template_path, "r") as archive:
+        archive.extractall(unpacked_dir)
 
 
 def pack_document(unpacked_dir: Path, output_path: str, template_path: str) -> str:
+    """Repack unchanged parts byte-for-byte and changed parts only where necessary."""
+
+    del template_path  # retained for the existing public API
     target = _save_docx_with_fallback(output_path)
-    _, message = skill_pack(
-        str(unpacked_dir),
-        target,
-        original_file=template_path,
-        validate=True,
-    )
-    if "Error" in message:
-        raise RuntimeError(message)
-    if target != output_path:
-        print(
-            f"Warning: could not write to {output_path} (file may be open in Word). "
-            f"Saved to: {target}"
-        )
-    print(message)
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file_path in sorted(unpacked_dir.rglob("*")):
+            if file_path.is_file():
+                archive.write(file_path, file_path.relative_to(unpacked_dir).as_posix())
     return target
 
 
@@ -438,7 +573,6 @@ def apply_replacements_to_docx(
         temp_dir = tempfile.TemporaryDirectory()
         unpacked_dir = Path(temp_dir.name) / "unpacked"
         unpack_template(template_path, unpacked_dir)
-
     try:
         if replacements:
             _apply_replacements_to_unpacked(unpacked_dir, spans, replacements)
@@ -452,5 +586,5 @@ def prepare_template(template_path: str) -> tuple[tempfile.TemporaryDirectory[st
     temp_dir = tempfile.TemporaryDirectory()
     unpacked_dir = Path(temp_dir.name) / "unpacked"
     unpack_template(template_path, unpacked_dir)
-    spans = find_marker_spans_xml(unpacked_dir / "word" / "document.xml")
+    spans = find_marker_spans_in_unpacked(unpacked_dir)
     return temp_dir, unpacked_dir, spans

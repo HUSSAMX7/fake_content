@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from agents.answer_agent import fill_answers
 from agents.integrator import integrate
 from agents.template_planner import plan_template
+from docx_integrator import prepare_template
 from document_loader import load_documents
 from docx_utils import load_docx
 
@@ -22,10 +22,17 @@ def run_pipeline(
     output_path = str(output_path)
 
     template_text = load_docx(template_path)
-    state: dict = {
-        **plan_template({"template_text": template_text}),
-        "template_text": template_text,
-    }
+    inventory_dir, _, marker_spans = prepare_template(template_path)
+    try:
+        if not marker_spans:
+            raise ValueError("Template does not contain any valid @...@@ marker spans")
+        state: dict = {
+            **plan_template({"template_text": template_text, "marker_spans": marker_spans}),
+            "template_text": template_text,
+            "marker_spans": marker_spans,
+        }
+    finally:
+        inventory_dir.cleanup()
     state["tender_text"] = load_documents(resource_paths_str)
     state = {**state, **fill_answers(state)}
     state = {**state, **integrate(state, template_path, output_path)}
@@ -33,5 +40,8 @@ def run_pipeline(
 
 
 def template_has_markers(template_path: str | Path) -> bool:
-    text = load_docx(str(template_path))
-    return re.search(r"@.+?@@", text, re.DOTALL) is not None
+    temp_dir, _, spans = prepare_template(str(template_path))
+    try:
+        return bool(spans)
+    finally:
+        temp_dir.cleanup()

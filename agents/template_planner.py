@@ -1,8 +1,10 @@
+import json
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from graph_state import GraphState
 from llm_config import llm
-from schemas import TemplatePlannerOutput
+from schemas import InstructionItem, TemplatePlannerOutput
 
 SYSTEM_PROMPT = """\
 You are the Template Planner agent.
@@ -43,11 +45,78 @@ timelines, requirements, etc.).
 """
 
 
+def _canonical_inventory(spans: list[dict]) -> list[InstructionItem]:
+    """Assign stable IDs from the OOXML inventory, never from model output."""
+
+    by_instruction: dict[str, InstructionItem] = {}
+    for span in spans:
+        instruction = span["inner"].strip()
+        key = " ".join(instruction.split())
+        if key not in by_instruction:
+            by_instruction[key] = InstructionItem(
+                tag_id=f"TAG_{len(by_instruction) + 1:02d}",
+                instruction=instruction,
+                contexts=[],
+                questions=[],
+            )
+        by_instruction[key].contexts.append(f"{span['part']}:{span['start']}")
+    return list(by_instruction.values())
+
+
 def plan_template(state: GraphState) -> dict:
+    spans = state.get("marker_spans")
+    if not spans:
+        # Compatibility for callers outside the production pipeline.
+        result = llm.with_structured_output(TemplatePlannerOutput).invoke(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=f"Template:\n\n{state['template_text']}"),
+            ]
+        )
+        return {"instructions": result.instructions}
+
+    inventory = _canonical_inventory(spans)
+    inventory_json = json.dumps(
+        [
+            {
+                "tag_id": item.tag_id,
+                "instruction": item.instruction,
+                "contexts": item.contexts,
+            }
+            for item in inventory
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
     result = llm.with_structured_output(TemplatePlannerOutput).invoke(
         [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=f"Template:\n\n{state['template_text']}"),
+            SystemMessage(
+                content=(
+                    "You are given the complete, deterministic marker inventory. "
+                    "Do not discover, omit, merge, rename, paraphrase, or invent tags. "
+                    "Return exactly one entry for every supplied instruction and only "
+                    "generate its retrieval questions.\n\n" + SYSTEM_PROMPT
+                )
+            ),
+            HumanMessage(content=f"Marker inventory:\n{inventory_json}"),
         ]
     )
-    return {"instructions": result.instructions}
+    returned = {" ".join(item.instruction.split()): item for item in result.instructions}
+    expected = {" ".join(item.instruction.split()) for item in inventory}
+    if set(returned) != expected or len(returned) != len(result.instructions):
+        missing = sorted(expected - set(returned))
+        extra = sorted(set(returned) - expected)
+        duplicates = len(result.instructions) - len(returned)
+        raise RuntimeError(
+            f"Template planner coverage failure; missing={missing}, extra={extra}, duplicates={duplicates}"
+        )
+
+    # Keep IDs, instruction text, and locations from the XML inventory even if a
+    # model changes whitespace or IDs in its structured response.
+    instructions = [
+        item.model_copy(
+            update={"questions": returned[" ".join(item.instruction.split())].questions}
+        )
+        for item in inventory
+    ]
+    return {"instructions": instructions}

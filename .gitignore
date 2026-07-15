@@ -17,6 +17,8 @@ htmlcov/
 # Environment & secrets
 .env
 .env.*
+!.env.example
+!frontend/.env.example
 
 # IDE / OS
 .DS_Store
@@ -28,8 +30,18 @@ Thumbs.db
 *.rar
 *.docx
 *.pdf
+!backend/defaults/
+!backend/defaults/*.docx
 _عروض فنية نماذج ناجحة/
 _عروض فنية نماذج ناجحة.rar
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Local temp / outputs
+backend/.tmp/
 
 # Scratch files
 Untitled

@@ -1,0 +1,34 @@
+# صياغة — Deploy Blueprint for Render
+# Dashboard: New → Blueprint → connect this repo
+# After first deploy, set env vars (OPENAI_API_KEY, CORS_ORIGINS, NEXT_PUBLIC_API_URL)
+
+services:
+  - type: web
+    name: siyagha-api
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+
+  - type: web
+    name: siyagha-web
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: "22.14.0"
+      - key: NEXT_PUBLIC_API_URL
+        sync: false

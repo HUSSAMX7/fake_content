@@ -9,6 +9,7 @@ unrelated formatting from a rich Word template.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import tempfile
 import zipfile
@@ -18,6 +19,8 @@ from pathlib import Path
 from lxml import etree as ET
 
 from schemas import ContentBlock, InstructionItem
+
+logger = logging.getLogger(__name__)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
@@ -302,7 +305,15 @@ def _record_data_binding_update(
     key = (store_item_id, xpath, prefix_mappings)
     existing = updates.get(key)
     if existing is not None and existing != value:
-        raise ValueError(f"Conflicting replacements for data-bound field {xpath}")
+        # Multiple inline markers can bind to the same Word property (e.g. dc:title).
+        # Keep the first recorded docProps value; each span still gets its inline XML replacement.
+        logger.warning(
+            "Skipping conflicting docProps update for %s; keeping %r over %r",
+            xpath,
+            existing,
+            value,
+        )
+        return
     updates[key] = value
 
 

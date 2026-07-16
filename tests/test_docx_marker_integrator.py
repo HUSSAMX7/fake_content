@@ -157,6 +157,49 @@ class MarkerIntegratorTests(unittest.TestCase):
             self.assertEqual(len(anchor_indices), 1)
             self.assertLess(max(phase_indices), anchor_indices[0])
 
+    def test_conflicting_data_bound_title_updates_do_not_abort(self) -> None:
+        temp_dir, unpacked_dir, spans = prepare_template(str(TEMPLATE))
+        try:
+            title_spans = [span for span in spans if span["inner"] == "اسم المشروع"]
+            self.assertGreater(len(title_spans), 1)
+
+            replacements = {
+                span["span_index"]: (
+                    [paragraph("مشروع الاختبار المتكامل")]
+                    if span["inner"] == "اسم المشروع"
+                    else [paragraph("الجهة التجريبية")]
+                    if span["inner"] in {"اسم الجهة الكامل", "اسم الجهة بالكامل"}
+                    else [
+                        ContentBlock(type="numbered_item", text="المرحلة الأولى: تحليل الوضع الحالي"),
+                        ContentBlock(type="numbered_item", text="المرحلة الثانية: تصميم النموذج المستهدف"),
+                    ]
+                    if "مراحل خطة العمل" in span["inner"]
+                    else [
+                        ContentBlock(type="heading", text="عنوان مرحلة اختبار"),
+                        paragraph("الفقرة الأولى للاختبار"),
+                        ContentBlock(type="bullet_item", text="بند اختبار"),
+                    ]
+                    if span["start"] != span["end"]
+                    else [paragraph(f"قيمة اختبار {span['span_index']}")]
+                )
+                for span in spans
+            }
+            for index, span in enumerate(title_spans):
+                replacements[span["span_index"]] = [paragraph(f"عنوان متعارض {index}")]
+
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "filled.docx"
+                result = apply_replacements_to_docx(
+                    str(TEMPLATE),
+                    str(output),
+                    spans,
+                    replacements,
+                    unpacked_dir=unpacked_dir,
+                )
+                self.assertTrue(Path(result).exists())
+        finally:
+            temp_dir.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

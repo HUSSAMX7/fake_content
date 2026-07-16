@@ -54,3 +54,18 @@ npm run dev
 - الـ API على خطة **Starter** في الـ Blueprint لأن التوليد يحتاج ذاكرة أكبر من Free (512MB).
 - Free للواجهة قد يدخل sleep بعد خمول؛ أول طلب بعد النوم يتأخر ~دقيقة.
 - مهلة طلب Render تصل حتى ~100 دقيقة — مناسبة للتوليد الطويل نسبيًا.
+
+### إذا فشل Deploy للواجهة بـ Timed out
+
+على خدمة الواجهة (`syaghah` أو `siyagha-web`) في Render Dashboard → **Settings**:
+
+| الإعداد | القيمة |
+|---------|--------|
+| Root Directory | `frontend` |
+| Build Command | `chmod +x scripts/render-build.sh && ./scripts/render-build.sh` |
+| Start Command | `npm run start` |
+| Health Check Path | `/` |
+
+وتأكد من وجود `NEXT_PUBLIC_API_URL` في **Environment** ثم **Clear build cache & deploy**.
+
+إذا استمر الفشل: ارفع الخطة من **Free** إلى **Starter** (ذاكرة أكبر أثناء البناء والتشغيل).

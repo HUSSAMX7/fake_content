@@ -165,6 +165,33 @@ def _build_span_payloads(
     return temp_dir, unpacked_dir, spans, payloads
 
 
+def _normalize_integrator_replacements(
+    result: IntegratorOutput,
+    expected: set[int],
+) -> dict[int, list[ContentBlock]]:
+    replacements: dict[int, list[ContentBlock]] = {}
+    for item in result.replacements:
+        if item.span_index not in expected:
+            continue
+        # Models sometimes emit the same span_index twice; keep the first usable entry.
+        if item.span_index in replacements:
+            continue
+        replacements[item.span_index] = item.blocks
+
+    missing = sorted(expected - set(replacements))
+    if missing:
+        raise RuntimeError(f"Integrator coverage failure; missing={missing}")
+
+    empty = [
+        index
+        for index, blocks in replacements.items()
+        if not blocks or not any(block.text.strip() for block in blocks)
+    ]
+    if empty:
+        raise RuntimeError(f"Integrator returned blank replacement(s): {empty}")
+    return replacements
+
+
 def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
     result = invoke_structured(
         IntegratorOutput,
@@ -174,24 +201,7 @@ def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
         ],
     )
     expected = {payload["span_index"] for payload in payloads}
-    returned = [item.span_index for item in result.replacements]
-    duplicate_ids = {index for index in returned if returned.count(index) > 1}
-    actual = set(returned)
-    if actual != expected or duplicate_ids:
-        raise RuntimeError(
-            "Integrator coverage failure; "
-            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}, "
-            f"duplicates={sorted(duplicate_ids)}"
-        )
-    replacements = {item.span_index: item.blocks for item in result.replacements}
-    empty = [
-        index
-        for index, blocks in replacements.items()
-        if not blocks or not any(block.text.strip() for block in blocks)
-    ]
-    if empty:
-        raise RuntimeError(f"Integrator returned blank replacement(s): {empty}")
-    return replacements
+    return _normalize_integrator_replacements(result, expected)
 
 
 def _writing_plan(payload: dict) -> SpanWritingPlan:

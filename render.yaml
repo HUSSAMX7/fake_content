@@ -25,10 +25,13 @@ services:
     plan: free
     region: oregon
     rootDir: frontend
-    buildCommand: npm ci && npm run build
+    buildCommand: chmod +x scripts/render-build.sh && ./scripts/render-build.sh
     startCommand: npm run start
+    healthCheckPath: /
     envVars:
       - key: NODE_VERSION
         value: "22.14.0"
       - key: NEXT_PUBLIC_API_URL
         sync: false
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"

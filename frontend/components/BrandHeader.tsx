@@ -1,3 +1,5 @@
+import { cn } from "@/lib/utils";
+
 type BrandHeaderProps = {
   compact?: boolean;
 };
@@ -20,11 +22,22 @@ export function BrandHeader({ compact = false }: BrandHeaderProps) {
         <img
           src="/rmg-logo.png"
           alt="RMG — ريناد المجد"
-          className={
+          className={cn(
             compact
-              ? "h-7 w-auto shrink-0 object-contain"
-              : "h-9 w-auto shrink-0 object-contain sm:h-10"
-          }
+              ? "h-9 w-auto shrink-0 object-contain"
+              : "h-11 w-auto shrink-0 object-contain sm:h-12",
+            "dark:hidden",
+          )}
+        />
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/rmg-logo-dark.png"
+          alt="RMG — ريناد المجد"
+          className={cn(
+            compact
+              ? "hidden h-9 w-auto shrink-0 object-contain dark:block"
+              : "hidden h-11 w-auto shrink-0 object-contain dark:block sm:h-12",
+          )}
         />
       </div>
       <div className="space-y-0.5">

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { ThemeProvider } from "@/components/ThemeProvider";
 import { DirectionProvider } from "@/components/ui/direction";
 
 import "./globals.css";
@@ -15,9 +16,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ar" dir="rtl" className="h-full bg-background antialiased">
+    <html
+      lang="ar"
+      dir="rtl"
+      className="h-full bg-background antialiased"
+      suppressHydrationWarning
+    >
       <head>
-        <meta name="color-scheme" content="light" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
           rel="preconnect"
@@ -30,7 +35,9 @@ export default function RootLayout({
         />
       </head>
       <body className="min-h-full bg-background font-sans text-foreground">
-        <DirectionProvider direction="rtl">{children}</DirectionProvider>
+        <ThemeProvider>
+          <DirectionProvider direction="rtl">{children}</DirectionProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

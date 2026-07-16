@@ -5,6 +5,7 @@ import { Check, LoaderCircle } from "lucide-react";
 
 import { BrandHeader } from "@/components/BrandHeader";
 import { StepRail } from "@/components/StepRail";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import type { AppSection } from "@/lib/sections";
@@ -96,7 +97,10 @@ export function AppShell({
   );
 
   const loadingNote = loading ? (
-    <p className="text-xs leading-relaxed text-muted-foreground" role="status">
+    <p
+      className="text-xs leading-relaxed text-muted-foreground dark:text-white/70"
+      role="status"
+    >
       قد يستغرق التوليد عدة دقائق. يُرجى عدم إغلاق الصفحة.
     </p>
   ) : null;
@@ -127,9 +131,14 @@ export function AppShell({
 
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
-      <header className="sticky top-0 z-20 border-b border-border bg-background lg:hidden">
+      <header className="sticky top-0 z-20 border-b border-border bg-background dark:border-white/10 lg:hidden">
         <div className="px-4 py-4">
-          <BrandHeader compact />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <BrandHeader compact />
+            </div>
+            <ThemeToggle />
+          </div>
         </div>
         <nav
           className="flex gap-1 overflow-x-auto px-3 pb-3"
@@ -147,7 +156,7 @@ export function AppShell({
                   "flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                   active
                     ? "bg-brand text-white"
-                    : "bg-secondary text-muted-foreground hover:bg-muted hover:text-foreground",
+                    : "bg-secondary text-muted-foreground hover:bg-muted hover:text-foreground dark:bg-white/5 dark:text-white/80 dark:hover:bg-white/10 dark:hover:text-white",
                 )}
                 aria-current={active ? "true" : undefined}
               >
@@ -160,7 +169,7 @@ export function AppShell({
                     "max-w-24 truncate rounded-md px-1.5 py-0.5 text-[11px]",
                     active
                       ? "bg-white/20 text-white"
-                      : "bg-muted text-muted-foreground",
+                      : "bg-muted text-muted-foreground dark:bg-white/10 dark:text-white/70",
                   )}
                 >
                   {sectionHint(item.id)}
@@ -171,9 +180,14 @@ export function AppShell({
         </nav>
       </header>
 
-      <aside className="sticky top-0 hidden h-svh w-72 shrink-0 flex-col border-e border-border bg-background lg:flex">
+      <aside className="sticky top-0 hidden h-svh w-72 shrink-0 flex-col border-e border-border bg-background dark:border-white/10 lg:flex">
         <div className="flex h-full flex-col gap-8 overflow-y-auto px-5 py-8">
-          <BrandHeader compact />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <BrandHeader compact />
+            </div>
+            <ThemeToggle />
+          </div>
 
           <nav className="flex flex-1 flex-col gap-1.5" aria-label="أقسام التطبيق">
             {NAV_ITEMS.map((item) => {
@@ -188,7 +202,7 @@ export function AppShell({
                     "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-start text-sm font-medium transition-colors",
                     active
                       ? "bg-brand text-white"
-                      : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                      : "text-muted-foreground hover:bg-secondary hover:text-foreground dark:text-white/80 dark:hover:bg-white/10 dark:hover:text-white",
                   )}
                   aria-current={active ? "true" : undefined}
                 >
@@ -203,7 +217,7 @@ export function AppShell({
                       "max-w-28 truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal",
                       active
                         ? "bg-white/20 text-white"
-                        : "bg-muted text-muted-foreground",
+                        : "bg-muted text-muted-foreground dark:bg-white/10 dark:text-white/65",
                     )}
                   >
                     {sectionHint(item.id)}
@@ -214,13 +228,13 @@ export function AppShell({
           </nav>
 
           {showShellGenerate ? (
-            <div className="mt-auto space-y-3 border-t border-border pt-5">
+            <div className="mt-auto space-y-3 border-t border-border pt-5 dark:border-white/10">
               {generateButton}
               {loadingNote}
             </div>
           ) : (
-            <div className="mt-auto border-t border-border pt-5">
-              <p className="text-xs leading-relaxed text-muted-foreground">
+            <div className="mt-auto border-t border-border pt-5 dark:border-white/10">
+              <p className="text-xs leading-relaxed text-muted-foreground dark:text-white/60">
                 أكمل التوليد من لوحة المحتوى.
               </p>
             </div>
@@ -253,7 +267,7 @@ export function AppShell({
         </main>
 
         {showShellGenerate ? (
-          <div className="sticky bottom-0 z-20 space-y-2 border-t border-border bg-background/95 px-4 py-4 backdrop-blur lg:hidden">
+          <div className="sticky bottom-0 z-20 space-y-2 border-t border-border bg-background/95 px-4 py-4 backdrop-blur dark:border-white/10 dark:bg-[#111927]/95 lg:hidden">
             {generateButton}
             {loadingNote}
           </div>

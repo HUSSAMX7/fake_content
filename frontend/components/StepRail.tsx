@@ -46,7 +46,7 @@ export function StepRail({
                   "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-start text-sm transition-colors",
                   active
                     ? "bg-brand text-white"
-                    : "bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-foreground",
+                    : "bg-secondary/50 text-muted-foreground hover:bg-secondary hover:text-foreground dark:bg-white/5 dark:text-white/80 dark:hover:bg-white/10 dark:hover:text-white",
                 )}
                 aria-current={active ? "true" : undefined}
               >
@@ -57,7 +57,7 @@ export function StepRail({
                       ? "bg-white/20 text-white"
                       : complete
                         ? "bg-brand/20 text-brand"
-                        : "bg-muted text-muted-foreground",
+                        : "bg-muted text-muted-foreground dark:bg-white/10",
                   )}
                 >
                   {complete && !active ? (

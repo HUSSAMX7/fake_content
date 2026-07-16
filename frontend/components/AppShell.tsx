@@ -96,7 +96,7 @@ export function AppShell({
   );
 
   const loadingNote = loading ? (
-    <p className="text-xs leading-relaxed text-white/70" role="status">
+    <p className="text-xs leading-relaxed text-muted-foreground" role="status">
       قد يستغرق التوليد عدة دقائق. يُرجى عدم إغلاق الصفحة.
     </p>
   ) : null;
@@ -127,7 +127,7 @@ export function AppShell({
 
   return (
     <div className="flex min-h-full flex-col lg:flex-row">
-      <header className="sticky top-0 z-20 border-b border-white/10 bg-[#111927] lg:hidden">
+      <header className="sticky top-0 z-20 border-b border-border bg-background lg:hidden">
         <div className="px-4 py-4">
           <BrandHeader compact />
         </div>
@@ -147,7 +147,7 @@ export function AppShell({
                   "flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                   active
                     ? "bg-brand text-white"
-                    : "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white",
+                    : "bg-secondary text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
                 aria-current={active ? "true" : undefined}
               >
@@ -158,7 +158,9 @@ export function AppShell({
                 <span
                   className={cn(
                     "max-w-24 truncate rounded-md px-1.5 py-0.5 text-[11px]",
-                    active ? "bg-white/20 text-white" : "bg-white/10 text-white/70",
+                    active
+                      ? "bg-white/20 text-white"
+                      : "bg-muted text-muted-foreground",
                   )}
                 >
                   {sectionHint(item.id)}
@@ -169,7 +171,7 @@ export function AppShell({
         </nav>
       </header>
 
-      <aside className="sticky top-0 hidden h-svh w-72 shrink-0 flex-col border-e border-white/10 bg-[#111927] lg:flex">
+      <aside className="sticky top-0 hidden h-svh w-72 shrink-0 flex-col border-e border-border bg-background lg:flex">
         <div className="flex h-full flex-col gap-8 overflow-y-auto px-5 py-8">
           <BrandHeader compact />
 
@@ -186,7 +188,7 @@ export function AppShell({
                     "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-start text-sm font-medium transition-colors",
                     active
                       ? "bg-brand text-white"
-                      : "text-white/80 hover:bg-white/10 hover:text-white",
+                      : "text-muted-foreground hover:bg-secondary hover:text-foreground",
                   )}
                   aria-current={active ? "true" : undefined}
                 >
@@ -199,7 +201,9 @@ export function AppShell({
                   <span
                     className={cn(
                       "max-w-28 truncate rounded-md px-1.5 py-0.5 text-[11px] font-normal",
-                      active ? "bg-white/20 text-white" : "bg-white/10 text-white/65",
+                      active
+                        ? "bg-white/20 text-white"
+                        : "bg-muted text-muted-foreground",
                     )}
                   >
                     {sectionHint(item.id)}
@@ -210,13 +214,13 @@ export function AppShell({
           </nav>
 
           {showShellGenerate ? (
-            <div className="mt-auto space-y-3 border-t border-white/10 pt-5">
+            <div className="mt-auto space-y-3 border-t border-border pt-5">
               {generateButton}
               {loadingNote}
             </div>
           ) : (
-            <div className="mt-auto border-t border-white/10 pt-5">
-              <p className="text-xs leading-relaxed text-white/60">
+            <div className="mt-auto border-t border-border pt-5">
+              <p className="text-xs leading-relaxed text-muted-foreground">
                 أكمل التوليد من لوحة المحتوى.
               </p>
             </div>
@@ -249,7 +253,7 @@ export function AppShell({
         </main>
 
         {showShellGenerate ? (
-          <div className="sticky bottom-0 z-20 space-y-2 border-t border-white/10 bg-[#111927]/95 px-4 py-4 backdrop-blur lg:hidden">
+          <div className="sticky bottom-0 z-20 space-y-2 border-t border-border bg-background/95 px-4 py-4 backdrop-blur lg:hidden">
             {generateButton}
             {loadingNote}
           </div>

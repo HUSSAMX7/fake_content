@@ -57,7 +57,7 @@ export function StepRail({
                       ? "bg-white/20 text-white"
                       : complete
                         ? "bg-brand/20 text-brand"
-                        : "bg-white/10 text-muted-foreground",
+                        : "bg-muted text-muted-foreground",
                   )}
                 >
                   {complete && !active ? (

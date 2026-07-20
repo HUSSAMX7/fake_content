@@ -8,7 +8,8 @@
 
 ```bash
 uv sync
-# ضع OPENAI_API_KEY في ملف .env (انظر .env.example)
+# ضع OPENAI_API_KEY و OPENROUTER_API_KEY في ملف .env (انظر .env.example)
+# OPENROUTER_API_KEY مطلوب لتوليد الصور (Nano Banana 2 Lite)
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -43,7 +44,8 @@ npm run dev
 
 | Service | Variable | Example |
 |---------|----------|---------|
-| `siyagha-api` | `OPENAI_API_KEY` | مفتاحك |
+| `siyagha-api` | `OPENAI_API_KEY` | مفتاح OpenAI (النص) |
+| `siyagha-api` | `OPENROUTER_API_KEY` | مفتاح OpenRouter (الصور) |
 | `siyagha-api` | `CORS_ORIGINS` | `https://siyagha-web.onrender.com` |
 | `siyagha-web` | `NEXT_PUBLIC_API_URL` | `https://siyagha-api.onrender.com` |
 

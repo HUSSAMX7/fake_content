@@ -46,6 +46,43 @@ class IntegratorCoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing=\\[2\\]"):
             _normalize_integrator_replacements(result, expected={1, 2})
 
+    def test_image_block_requires_image_prompt(self) -> None:
+        result = IntegratorOutput(
+            replacements=[
+                SpanReplacement(
+                    span_index=1,
+                    tag_id="TAG_01",
+                    blocks=[
+                        ContentBlock(type="image", text="شكل (1)", image_prompt=None),
+                    ],
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "missing image_prompt"):
+            _normalize_integrator_replacements(result, expected={1})
+
+    def test_image_block_with_prompt_is_accepted(self) -> None:
+        result = IntegratorOutput(
+            replacements=[
+                SpanReplacement(
+                    span_index=1,
+                    tag_id="TAG_01",
+                    blocks=[
+                        ContentBlock(
+                            type="image",
+                            text="شكل (1): المراحل",
+                            image_prompt="Horizontal flowchart of four project phases",
+                        ),
+                    ],
+                ),
+            ]
+        )
+
+        replacements = _normalize_integrator_replacements(result, expected={1})
+        self.assertEqual(replacements[1][0].type, "image")
+        self.assertTrue(replacements[1][0].image_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

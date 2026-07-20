@@ -1,6 +1,6 @@
 # صياغة — Deploy Blueprint for Render
 # Dashboard: New → Blueprint → connect this repo
-# After first deploy, set env vars (OPENAI_API_KEY, CORS_ORIGINS, NEXT_PUBLIC_API_URL)
+# After first deploy, set env vars (OPENAI_API_KEY, OPENROUTER_API_KEY, CORS_ORIGINS, NEXT_PUBLIC_API_URL)
 
 services:
   - type: web
@@ -15,6 +15,8 @@ services:
       - key: PYTHON_VERSION
         value: "3.13.5"
       - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
         sync: false
       - key: CORS_ORIGINS
         sync: false

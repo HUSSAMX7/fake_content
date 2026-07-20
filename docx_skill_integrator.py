@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import shutil
+import struct
 import tempfile
 import zipfile
 from collections import defaultdict
@@ -24,9 +26,24 @@ logger = logging.getLogger(__name__)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 V_NS = "urn:schemas-microsoft-com:vml"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 ET.register_namespace("w", W_NS)
+ET.register_namespace("wp", WP_NS)
+ET.register_namespace("a", A_NS)
+ET.register_namespace("pic", PIC_NS)
+ET.register_namespace("r", R_NS)
+
+_EMU_PER_INCH = 914400
+_TARGET_IMAGE_WIDTH_EMU = 5486400  # ~6 inches / ~15 cm
+_IMAGE_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+)
 
 _STORY_PART_RE = re.compile(
     r"^word/(?:document|header\d+|footer\d+|footnotes|endnotes)\.xml$"
@@ -190,7 +207,11 @@ def match_tag(inner_text: str, instructions: list[InstructionItem]) -> Instructi
 
 
 def _inline_text(blocks: list[ContentBlock]) -> str:
-    return " ".join(_normalize_block_text(block) for block in blocks if block.text.strip())
+    return " ".join(
+        _normalize_block_text(block)
+        for block in blocks
+        if block.type != "image" and block.text.strip()
+    )
 
 
 def _should_render_as_blocks(span: dict, blocks: list[ContentBlock]) -> bool:
@@ -198,6 +219,8 @@ def _should_render_as_blocks(span: dict, blocks: list[ContentBlock]) -> bool:
         raise ValueError(f"Empty replacement for marker {span['span_index']}")
     if span["inline"]:
         return False
+    if any(block.type == "image" for block in blocks):
+        return True
     return len(blocks) > 1 or blocks[0].type != "paragraph"
 
 
@@ -418,6 +441,235 @@ def _set_paragraph_style(p_pr: ET.Element, style_name: str) -> None:
     style.set(_tag("val"), style_name)
 
 
+def _png_pixel_size(path: Path) -> tuple[int, int]:
+    with path.open("rb") as handle:
+        signature = handle.read(8)
+        if signature == b"\x89PNG\r\n\x1a\n":
+            length = struct.unpack(">I", handle.read(4))[0]
+            chunk_type = handle.read(4)
+            if chunk_type != b"IHDR" or length < 8:
+                raise ValueError(f"Invalid PNG IHDR: {path}")
+            width, height = struct.unpack(">II", handle.read(8))
+            if width <= 0 or height <= 0:
+                raise ValueError(f"Invalid PNG dimensions: {path}")
+            return width, height
+
+    # Fallback for any still-unnormalized provider format.
+    from PIL import Image
+
+    with Image.open(path) as image:
+        width, height = image.size
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid image dimensions: {path}")
+    return width, height
+
+
+def _image_extent_emu(path: Path) -> tuple[int, int]:
+    width_px, height_px = _png_pixel_size(path)
+    cx = _TARGET_IMAGE_WIDTH_EMU
+    cy = max(1, int(cx * (height_px / width_px)))
+    return cx, cy
+
+
+def _rels_path_for_part(unpacked_dir: Path, part_name: str) -> Path:
+    part = Path(part_name)
+    return unpacked_dir / part.parent / "_rels" / f"{part.name}.rels"
+
+
+def _ensure_png_content_type(unpacked_dir: Path) -> None:
+    types_path = unpacked_dir / "[Content_Types].xml"
+    tree = ET.parse(str(types_path))
+    root = tree.getroot()
+    for node in root.findall(f"{{{CT_NS}}}Default"):
+        if (node.get("Extension") or "").lower() == "png":
+            return
+    default = ET.SubElement(root, f"{{{CT_NS}}}Default")
+    default.set("Extension", "png")
+    default.set("ContentType", "image/png")
+    tree.write(str(types_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _next_relationship_id(rels_root: ET.Element) -> str:
+    used: set[int] = set()
+    for node in rels_root.findall(f"{{{REL_NS}}}Relationship"):
+        rel_id = node.get("Id") or ""
+        match = re.fullmatch(r"rId(\d+)", rel_id)
+        if match:
+            used.add(int(match.group(1)))
+    candidate = 1
+    while candidate in used:
+        candidate += 1
+    return f"rId{candidate}"
+
+
+def _next_doc_pr_id(unpacked_dir: Path) -> int:
+    max_id = 0
+    for part_name in _story_parts(unpacked_dir):
+        part_path = unpacked_dir / part_name
+        root = ET.parse(str(part_path)).getroot()
+        for node in root.iter(f"{{{WP_NS}}}docPr"):
+            raw = node.get("id")
+            if raw and raw.isdigit():
+                max_id = max(max_id, int(raw))
+    return max_id + 1
+
+
+def _register_image_relationship(
+    unpacked_dir: Path,
+    part_name: str,
+    media_name: str,
+) -> str:
+    rels_path = _rels_path_for_part(unpacked_dir, part_name)
+    rels_path.parent.mkdir(parents=True, exist_ok=True)
+    if rels_path.exists():
+        tree = ET.parse(str(rels_path))
+        root = tree.getroot()
+    else:
+        root = ET.Element(f"{{{REL_NS}}}Relationships")
+        tree = ET.ElementTree(root)
+
+    rel_id = _next_relationship_id(root)
+    relationship = ET.SubElement(root, f"{{{REL_NS}}}Relationship")
+    relationship.set("Id", rel_id)
+    relationship.set("Type", _IMAGE_REL_TYPE)
+    relationship.set("Target", f"media/{media_name}")
+    tree.write(str(rels_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+    return rel_id
+
+
+def _copy_image_into_package(unpacked_dir: Path, source: Path) -> str:
+    media_dir = unpacked_dir / "word" / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        name = f"generated_{index}.png"
+        destination = media_dir / name
+        if not destination.exists():
+            shutil.copy2(source, destination)
+            return name
+        index += 1
+
+
+def _build_drawing_run(
+    rel_id: str,
+    media_name: str,
+    cx: int,
+    cy: int,
+    doc_pr_id: int,
+) -> ET.Element:
+    run = ET.Element(_tag("r"))
+    drawing = ET.SubElement(run, _tag("drawing"))
+    inline = ET.SubElement(
+        drawing,
+        f"{{{WP_NS}}}inline",
+        {
+            "distT": "0",
+            "distB": "0",
+            "distL": "0",
+            "distR": "0",
+        },
+    )
+    ET.SubElement(inline, f"{{{WP_NS}}}extent", {"cx": str(cx), "cy": str(cy)})
+    ET.SubElement(
+        inline,
+        f"{{{WP_NS}}}effectExtent",
+        {"l": "0", "t": "0", "r": "0", "b": "0"},
+    )
+    ET.SubElement(
+        inline,
+        f"{{{WP_NS}}}docPr",
+        {"id": str(doc_pr_id), "name": f"Picture {doc_pr_id}"},
+    )
+    cnv = ET.SubElement(inline, f"{{{WP_NS}}}cNvGraphicFramePr")
+    ET.SubElement(
+        cnv,
+        f"{{{A_NS}}}graphicFrameLocks",
+        {"noChangeAspect": "1"},
+    )
+    graphic = ET.SubElement(inline, f"{{{A_NS}}}graphic")
+    graphic_data = ET.SubElement(
+        graphic,
+        f"{{{A_NS}}}graphicData",
+        {"uri": "http://schemas.openxmlformats.org/drawingml/2006/picture"},
+    )
+    pic = ET.SubElement(graphic_data, f"{{{PIC_NS}}}pic")
+    nv = ET.SubElement(pic, f"{{{PIC_NS}}}nvPicPr")
+    ET.SubElement(
+        nv,
+        f"{{{PIC_NS}}}cNvPr",
+        {"id": "0", "name": media_name},
+    )
+    ET.SubElement(nv, f"{{{PIC_NS}}}cNvPicPr")
+    blip_fill = ET.SubElement(pic, f"{{{PIC_NS}}}blipFill")
+    ET.SubElement(blip_fill, f"{{{A_NS}}}blip", {f"{{{R_NS}}}embed": rel_id})
+    stretch = ET.SubElement(blip_fill, f"{{{A_NS}}}stretch")
+    ET.SubElement(stretch, f"{{{A_NS}}}fillRect")
+    sp_pr = ET.SubElement(pic, f"{{{PIC_NS}}}spPr")
+    xfrm = ET.SubElement(sp_pr, f"{{{A_NS}}}xfrm")
+    ET.SubElement(xfrm, f"{{{A_NS}}}off", {"x": "0", "y": "0"})
+    ET.SubElement(xfrm, f"{{{A_NS}}}ext", {"cx": str(cx), "cy": str(cy)})
+    prst = ET.SubElement(sp_pr, f"{{{A_NS}}}prstGeom", {"prst": "rect"})
+    ET.SubElement(prst, f"{{{A_NS}}}avLst")
+    return run
+
+
+def _generated_image_paragraph(
+    source: ET.Element,
+    block: ContentBlock,
+    unpacked_dir: Path,
+    part_name: str,
+    doc_pr_id: int,
+) -> ET.Element:
+    if not block.image_path:
+        raise ValueError("Image block is missing image_path")
+    source_path = Path(block.image_path)
+    if not source_path.is_file():
+        raise ValueError(f"Image file not found: {source_path}")
+
+    _ensure_png_content_type(unpacked_dir)
+    media_name = _copy_image_into_package(unpacked_dir, source_path)
+    rel_id = _register_image_relationship(unpacked_dir, part_name, media_name)
+    cx, cy = _image_extent_emu(source_path)
+
+    paragraph = ET.Element(_tag("p"))
+    source_ppr = source.find(_tag("pPr"))
+    if source_ppr is not None:
+        paragraph.append(copy.deepcopy(source_ppr))
+    paragraph.append(_build_drawing_run(rel_id, media_name, cx, cy, doc_pr_id))
+    return paragraph
+
+
+def _paragraphs_for_block(
+    source: ET.Element,
+    block: ContentBlock,
+    unpacked_dir: Path | None,
+    part_name: str,
+    doc_pr_counter: list[int],
+) -> list[ET.Element]:
+    if block.type != "image":
+        return [_generated_paragraph(source, block)]
+    if not block.image_path or unpacked_dir is None:
+        if block.text.strip():
+            return [_generated_paragraph(source, ContentBlock(type="paragraph", text=block.text))]
+        raise ValueError("Image block has no generated file and no caption")
+
+    paragraphs = [
+        _generated_image_paragraph(
+            source,
+            block,
+            unpacked_dir,
+            part_name,
+            doc_pr_counter[0],
+        )
+    ]
+    doc_pr_counter[0] += 1
+    if block.text.strip():
+        paragraphs.append(
+            _generated_paragraph(source, ContentBlock(type="paragraph", text=block.text))
+        )
+    return paragraphs
+
+
 def _generated_paragraph(source: ET.Element, block: ContentBlock) -> ET.Element:
     paragraph = ET.Element(_tag("p"))
     source_ppr = source.find(_tag("pPr"))
@@ -443,7 +695,13 @@ def _generated_paragraph(source: ET.Element, block: ContentBlock) -> ET.Element:
     return paragraph
 
 
-def _replace_block(root: ET.Element, span: dict, blocks: list[ContentBlock]) -> None:
+def _replace_block(
+    root: ET.Element,
+    span: dict,
+    blocks: list[ContentBlock],
+    unpacked_dir: Path | None = None,
+    doc_pr_counter: list[int] | None = None,
+) -> None:
     paragraphs = root.findall(f".//{_tag('p')}")
     targets = paragraphs[span["start"] : span["end"] + 1]
     if not targets:
@@ -460,7 +718,12 @@ def _replace_block(root: ET.Element, span: dict, blocks: list[ContentBlock]) -> 
     indices = [children.index(paragraph) for paragraph in targets]
     if indices != list(range(indices[0], indices[0] + len(indices))):
         raise ValueError("Block marker paragraphs are not consecutive siblings")
-    new_paragraphs = [_generated_paragraph(targets[0], block) for block in blocks]
+    counter = doc_pr_counter if doc_pr_counter is not None else [1]
+    new_paragraphs: list[ET.Element] = []
+    for block in blocks:
+        new_paragraphs.extend(
+            _paragraphs_for_block(targets[0], block, unpacked_dir, span["part"], counter)
+        )
     if not new_paragraphs:
         raise ValueError(f"Blank replacement for marker {span['span_index']}")
     for paragraph in targets:
@@ -473,6 +736,8 @@ def _replace_block_preserving_source_paragraph(
     root: ET.Element,
     span: dict,
     blocks: list[ContentBlock],
+    unpacked_dir: Path | None = None,
+    doc_pr_counter: list[int] | None = None,
 ) -> None:
     """Expand a marker without deleting an anchored drawing or bookmark.
 
@@ -488,16 +753,40 @@ def _replace_block_preserving_source_paragraph(
     source = paragraphs[span["start"]]
     if span["start_offset"] != 0 or span["end_offset"] != len(_paragraph_text(source)):
         raise ValueError("Protected block marker has surrounding text")
-    _replace_inline(root, span, [blocks[0]])
+
+    counter = doc_pr_counter if doc_pr_counter is not None else [1]
+    first, *rest = blocks
+    if first.type == "image":
+        # Keep protected furniture; clear marker, then insert drawing (+ caption) after.
+        _replace_inline(root, span, [ContentBlock(type="paragraph", text="\u00a0")])
+        anchor_paragraph = _detach_floating_runs(source)
+        parent = source.getparent()
+        if parent is None:
+            raise ValueError("Protected block marker has no parent container")
+        insert_at = list(parent).index(source) + 1
+        for block in [first, *rest]:
+            for paragraph in _paragraphs_for_block(
+                source, block, unpacked_dir, span["part"], counter
+            ):
+                parent.insert(insert_at, paragraph)
+                insert_at += 1
+        if anchor_paragraph is not None:
+            parent.insert(insert_at, anchor_paragraph)
+        return
+
+    _replace_inline(root, span, [first])
     anchor_paragraph = _detach_floating_runs(source)
     parent = source.getparent()
     if parent is None:
         raise ValueError("Protected block marker has no parent container")
     insert_at = list(parent).index(source) + 1
-    for offset, block in enumerate(blocks[1:]):
-        parent.insert(insert_at + offset, _generated_paragraph(source, block))
+    for offset, block in enumerate(rest):
+        extra = _paragraphs_for_block(source, block, unpacked_dir, span["part"], counter)
+        for paragraph in extra:
+            parent.insert(insert_at, paragraph)
+            insert_at += 1
     if anchor_paragraph is not None:
-        parent.insert(insert_at + len(blocks) - 1, anchor_paragraph)
+        parent.insert(insert_at, anchor_paragraph)
 
 
 def _apply_replacements_to_unpacked(
@@ -514,6 +803,7 @@ def _apply_replacements_to_unpacked(
     for index in replacements:
         by_part[span_lookup[index]["part"]].append(span_lookup[index])
 
+    doc_pr_counter = [_next_doc_pr_id(unpacked_dir)]
     binding_updates: dict[tuple[str, str, str], str] = {}
     for part_name, part_spans in by_part.items():
         part_path = unpacked_dir / part_name
@@ -528,9 +818,11 @@ def _apply_replacements_to_unpacked(
             if _should_render_as_blocks(span, blocks):
                 targets = paragraphs[span["start"] : span["end"] + 1]
                 if any(_contains_preserve_only_content(paragraph) for paragraph in targets):
-                    _replace_block_preserving_source_paragraph(root, span, blocks)
+                    _replace_block_preserving_source_paragraph(
+                        root, span, blocks, unpacked_dir, doc_pr_counter
+                    )
                 else:
-                    _replace_block(root, span, blocks)
+                    _replace_block(root, span, blocks, unpacked_dir, doc_pr_counter)
             else:
                 _record_data_binding_update(marker_paragraph, _inline_text(blocks), binding_updates)
                 _replace_inline(root, span, blocks)

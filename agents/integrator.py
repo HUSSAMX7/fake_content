@@ -4,6 +4,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agents.image_agent import generate_images_for_replacements
 from docx_integrator import apply_replacements_to_docx, match_tag, prepare_template
 from graph_state import GraphState
 from llm_config import invoke_structured
@@ -61,7 +62,8 @@ Write at the level of a winning Saudi government technical proposal:
 | فقرة أو فقرتين، ملخص نطاق | 1–2 `paragraph` blocks |
 | قائمة أهداف، جملة واحدة لكل هدف | `bullet_item` per objective — one sentence each |
 | قائمة + شرح بسيط عن كل مرحلة | `numbered_item` per phase — name + 1–2 sentence explanation |
-| inline field (مدة، اسم) | one short `paragraph` when inline=true |
+| ولد صورة / أدرج شكلاً / مخطط / رسم توضيحي | include one `image` block (see Image rules) |
+| inline field (مدة، اسم) | one short `paragraph` when inline=true — never `image` |
 | تفصيل كل مرحلة + لكل مرحلة: هدف/من خلال/إنجازات | full phase pattern below |
 
 Full phase pattern (ONLY when marker_instruction requires per-phase detail):
@@ -77,7 +79,8 @@ requires for a single item.
 
 ## Output format — structured blocks
 
-Return a `blocks` list per span. Each block has `type` and `text`:
+Return a `blocks` list per span. Each block has `type` and `text` \
+(and `image_prompt` when type is `image`):
 
 | type | when to use |
 |------|-------------|
@@ -85,6 +88,22 @@ Return a `blocks` list per span. Each block has `type` and `text`:
 | numbered_item | Ordered steps or sequential items |
 | bullet_item | Unordered lists, sub-points, activities, deliverables |
 | heading | Phase title or sub-section title |
+| image | AI figure when marker_instruction asks for a visual |
+
+### Image rules (natural language — no special marker syntax)
+
+Emit an `image` block ONLY when `marker_instruction` clearly asks for a figure, e.g. \
+ولد صورة، أدرج صورة/شكلاً، مخطط، رسم توضيحي، diagram, infographic.
+
+For an image block:
+- `text`: formal Arabic caption under the figure (e.g. «شكل (1): مراحل تنفيذ المشروع»)
+- `image_prompt`: precise English visual description grounded in question_answers \
+  (real phase names, real structure). Describe boxes, arrows, and layout. \
+  Do not invent phases, entities, or facts missing from question_answers.
+- Do NOT set `image_path` — it is filled later by the system.
+- Suggested order: optional short intro paragraph → one `image` → remaining text/lists as required.
+- Never emit `image` when inline=true.
+- At most one `image` block per span unless the instruction explicitly asks for multiple figures.
 
 Block rules:
 - Use multiple blocks when structure, phases, or lists are implied.
@@ -185,11 +204,28 @@ def _normalize_integrator_replacements(
     empty = [
         index
         for index, blocks in replacements.items()
-        if not blocks or not any(block.text.strip() for block in blocks)
+        if not blocks or not any(_block_has_content(block) for block in blocks)
     ]
     if empty:
         raise RuntimeError(f"Integrator returned blank replacement(s): {empty}")
+
+    invalid_images = [
+        index
+        for index, blocks in replacements.items()
+        for block in blocks
+        if block.type == "image" and not (block.image_prompt or "").strip()
+    ]
+    if invalid_images:
+        raise RuntimeError(
+            f"Integrator image block(s) missing image_prompt: {sorted(set(invalid_images))}"
+        )
     return replacements
+
+
+def _block_has_content(block: ContentBlock) -> bool:
+    if block.type == "image":
+        return bool((block.image_prompt or "").strip() or block.text.strip())
+    return bool(block.text.strip())
 
 
 def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
@@ -266,6 +302,9 @@ def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
                 "Replacement coverage failure; "
                 f"missing={sorted(expected_span_ids - set(replacements))}"
             )
+
+        image_dir = unpacked_dir.parent / "generated_images"
+        replacements = generate_images_for_replacements(replacements, image_dir)
 
         path = apply_replacements_to_docx(
             template_path,

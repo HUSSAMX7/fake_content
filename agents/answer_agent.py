@@ -1,6 +1,7 @@
 import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import ValidationError
 
 from graph_state import GraphState
 from llm_config import invoke_structured
@@ -25,6 +26,12 @@ deliverables, requirements, conditions, names, and specifications — leave noth
 9. For each tag, return one answer per question in the same order as that tag's questions list.
 10. Match the language of the template (Arabic or English).
 
+CRITICAL output shape (do not flatten):
+- `answers` is a list of tag objects only.
+- Each item MUST be: {"tag_id": "...", "question_answers": [{"question": "...", "answer": "..."}, ...]}
+- NEVER put a bare {"question": "...", "answer": "..."} object directly inside `answers`.
+- NEVER omit `tag_id` or `question_answers`.
+
 Extraction priorities (when relevant to the instruction):
 - Entity: official name, vision, mission, objectives, regulatory role.
 - Scope: services, deliverables, boundaries, exclusions, stakeholders, concurrent workstreams.
@@ -44,6 +51,13 @@ English equivalents ("according to the documents", "as stated in", "referenced i
 - If the same name or term appears in multiple forms, record the most complete official form once.
 """
 
+_SHAPE_REMINDER = """\
+Your previous structured output was invalid.
+Return AllTagsAnswerOutput again with the correct nesting:
+answers: [ { tag_id, question_answers: [ {question, answer}, ... ] }, ... ]
+Do not place question/answer objects directly in answers.
+"""
+
 
 def fill_answers(state: GraphState) -> dict:
     tags_json = json.dumps(
@@ -51,16 +65,30 @@ def fill_answers(state: GraphState) -> dict:
         ensure_ascii=False,
         indent=2,
     )
-    result = invoke_structured(
-        AllTagsAnswerOutput,
-        [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Instructions:\n{tags_json}\n\n"
-                    f"--- Source documents ---\n\n{state['tender_text']}"
-                )
-            ),
-        ],
-    )
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Instructions:\n{tags_json}\n\n"
+                f"--- Source documents ---\n\n{state['tender_text']}"
+            )
+        ),
+    ]
+
+    try:
+        result = invoke_structured(AllTagsAnswerOutput, messages)
+    except ValidationError:
+        # Same all-tags call; one corrective retry when the model flattens the schema.
+        result = invoke_structured(
+            AllTagsAnswerOutput,
+            [*messages, HumanMessage(content=_SHAPE_REMINDER)],
+        )
+
+    expected = [tag.tag_id for tag in state["instructions"]]
+    got = [answer.tag_id for answer in result.answers]
+    if got != expected:
+        raise RuntimeError(
+            "Answer tag coverage failure; "
+            f"expected={expected}, got={got}"
+        )
     return {"answers": result.answers}

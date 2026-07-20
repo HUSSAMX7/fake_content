@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -24,6 +25,24 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 def paragraph(text: str) -> ContentBlock:
     return ContentBlock(type="paragraph", text=text)
+
+
+def _write_solid_png(path: Path, width: int = 32, height: int = 20) -> None:
+    """Write a tiny valid RGB PNG without extra dependencies."""
+
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + (b"\xff\x00\x00" * width) for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
 
 
 class MarkerIntegratorTests(unittest.TestCase):
@@ -63,7 +82,7 @@ class MarkerIntegratorTests(unittest.TestCase):
                             ContentBlock(type="numbered_item", text="المرحلة الثالثة: تطوير حالات الاستخدام"),
                             ContentBlock(type="numbered_item", text="المرحلة الرابعة: التنفيذ والتفعيل"),
                         ]
-                        if "مراحل خطة العمل" in span["inner"]
+                        if "مراحل تنفيذ المشروع" in span["inner"]
                         else
                         [
                             ContentBlock(type="heading", text="عنوان مرحلة اختبار"),
@@ -173,7 +192,7 @@ class MarkerIntegratorTests(unittest.TestCase):
                         ContentBlock(type="numbered_item", text="المرحلة الأولى: تحليل الوضع الحالي"),
                         ContentBlock(type="numbered_item", text="المرحلة الثانية: تصميم النموذج المستهدف"),
                     ]
-                    if "مراحل خطة العمل" in span["inner"]
+                    if "مراحل تنفيذ المشروع" in span["inner"]
                     else [
                         ContentBlock(type="heading", text="عنوان مرحلة اختبار"),
                         paragraph("الفقرة الأولى للاختبار"),
@@ -199,6 +218,74 @@ class MarkerIntegratorTests(unittest.TestCase):
                 self.assertTrue(Path(result).exists())
         finally:
             temp_dir.cleanup()
+
+    def test_image_block_is_packed_into_word_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            png_path = Path(directory) / "figure.png"
+            _write_solid_png(png_path)
+            output = Path(directory) / "with_image.docx"
+            temp_dir, unpacked_dir, spans = prepare_template(str(TEMPLATE))
+            try:
+                target = next(
+                    span
+                    for span in spans
+                    if not span["inline"] and "أدرج شكلاً" in span["inner"]
+                )
+                replacements = {
+                    span["span_index"]: (
+                        [
+                            ContentBlock(
+                                type="image",
+                                text="شكل (1): مخطط اختبار",
+                                image_prompt="test diagram",
+                                image_path=str(png_path),
+                            ),
+                            paragraph("شرح مختصر بعد الشكل."),
+                        ]
+                        if span["span_index"] == target["span_index"]
+                        else [paragraph("مشروع الاختبار المتكامل")]
+                        if span["inner"] == "اسم المشروع"
+                        else [paragraph("الجهة التجريبية")]
+                        if span["inner"] in {"اسم الجهة الكامل", "اسم الجهة بالكامل"}
+                        else [
+                            ContentBlock(type="numbered_item", text="المرحلة الأولى: تحليل الوضع الحالي"),
+                            ContentBlock(type="numbered_item", text="المرحلة الثانية: تصميم النموذج المستهدف"),
+                            ContentBlock(type="numbered_item", text="المرحلة الثالثة: تطوير حالات الاستخدام"),
+                            ContentBlock(type="numbered_item", text="المرحلة الرابعة: التنفيذ والتفعيل"),
+                        ]
+                        if "مراحل تنفيذ المشروع" in span["inner"]
+                        else [
+                            ContentBlock(type="heading", text="عنوان مرحلة اختبار"),
+                            paragraph("الفقرة الأولى للاختبار"),
+                            ContentBlock(type="bullet_item", text="بند اختبار"),
+                        ]
+                        if span["start"] != span["end"]
+                        else [paragraph(f"قيمة اختبار {span['span_index']}")]
+                    )
+                    for span in spans
+                }
+                result = apply_replacements_to_docx(
+                    str(TEMPLATE),
+                    str(output),
+                    spans,
+                    replacements,
+                    unpacked_dir=unpacked_dir,
+                )
+            finally:
+                temp_dir.cleanup()
+
+            with zipfile.ZipFile(result) as archive:
+                media = [
+                    name
+                    for name in archive.namelist()
+                    if name.startswith("word/media/generated_")
+                ]
+                self.assertTrue(media, "generated image missing from package")
+                document_xml = archive.read("word/document.xml")
+                self.assertIn(b"w:drawing", document_xml)
+                self.assertIn("شكل (1): مخطط اختبار".encode("utf-8"), document_xml)
+                rels = archive.read("word/_rels/document.xml.rels").decode("utf-8")
+                self.assertIn("media/" + Path(media[0]).name, rels)
 
 
 if __name__ == "__main__":

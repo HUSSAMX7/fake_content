@@ -29,27 +29,50 @@ class QuestionAnswerItem(BaseModel):
 
 
 class TagAnswerOutput(BaseModel):
-    tag_id: str
+    tag_id: str = Field(description="Exact tag id from the instructions list, e.g. TAG_01")
     question_answers: list[QuestionAnswerItem] = Field(
-        description="Full detailed answer for each question, in the same order as provided"
+        description=(
+            "Nested list only — one {question, answer} per question for THIS tag. "
+            "Do not place these objects at the top-level answers array."
+        )
     )
 
 
 class AllTagsAnswerOutput(BaseModel):
     answers: list[TagAnswerOutput] = Field(
-        description="One entry per tag in the instructions list, same order"
+        description=(
+            "One TagAnswerOutput object per tag, same order as instructions. "
+            "Each element must include tag_id and question_answers. "
+            "Do not insert bare question/answer dicts into this list."
+        )
     )
 
 
 class ContentBlock(BaseModel):
-    type: Literal["paragraph", "numbered_item", "bullet_item", "heading"] = Field(
+    type: Literal["paragraph", "numbered_item", "bullet_item", "heading", "image"] = Field(
         description=(
             "paragraph: body text. numbered_item: ordered list entry. "
-            "bullet_item: bullet list entry. heading: section sub-heading."
+            "bullet_item: bullet list entry. heading: section sub-heading. "
+            "image: AI-generated figure; text is the Arabic caption, image_prompt is the "
+            "English visual description used for image generation."
         )
     )
     text: str = Field(
-        description="Block text at the depth required by marker_instruction."
+        description=(
+            "Block text at the depth required by marker_instruction. "
+            "For image blocks: formal Arabic caption under the figure."
+        )
+    )
+    image_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Required for image blocks. Precise English visual prompt for image generation. "
+            "Unused for non-image blocks."
+        ),
+    )
+    image_path: str | None = Field(
+        default=None,
+        description="Filled after image generation with a local PNG path. Never emit this field.",
     )
 
 

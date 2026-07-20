@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -9,7 +10,9 @@ load_dotenv()
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-TEMPLATE_PATH = r"C:\Users\hosam\OneDrive\سطح المكتب\good_temp\new_templete - image.docx"
+TEMPLATE_PATH = str(
+    Path(__file__).resolve().parent / "backend" / "defaults" / "good_template.docx"
+)
 OUTPUT_PATH = r"C:\Users\hosam\OneDrive\سطح المكتب\good_temp\output_draft.docx"
 
 TENDER_PATHS = [

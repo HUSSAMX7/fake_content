@@ -9,7 +9,8 @@
 ```bash
 uv sync
 # ضع OPENAI_API_KEY و OPENROUTER_API_KEY في ملف .env (انظر .env.example)
-# OPENROUTER_API_KEY مطلوب لتوليد الصور (Nano Banana 2 Lite)
+# الشارتات الذكية تُدرج كشارت وورد أصلي قابل للتعديل والتكبير (مع Excel مضمّن)
+# OPENROUTER_API_KEY مطلوب لتوليد الصور التوضيحية بالـ AI فقط
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

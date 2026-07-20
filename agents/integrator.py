@@ -4,6 +4,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agents.chart_agent import prepare_charts_for_replacements
 from agents.image_agent import generate_images_for_replacements
 from docx_integrator import apply_replacements_to_docx, match_tag, prepare_template
 from graph_state import GraphState
@@ -62,9 +63,11 @@ Write at the level of a winning Saudi government technical proposal:
 | فقرة أو فقرتين، ملخص نطاق | 1–2 `paragraph` blocks |
 | قائمة أهداف، جملة واحدة لكل هدف | `bullet_item` per objective — one sentence each |
 | قائمة + شرح بسيط عن كل مرحلة | `numbered_item` per phase — name + 1–2 sentence explanation |
-| ولد صورة / أدرج شكلاً / مخطط / رسم توضيحي | include one `image` block (see Image rules) |
+| ولد صورة / أدرج شكلاً / رسم توضيحي (غير بياني) | include one `image` block (see Image rules) |
+| شارت / مخطط بياني / رسم بياني / كميات / نسب / سمارت شارت | include one `chart` block (see Chart rules) — NOT `image` |
 | figure as main deliverable with little/no follow-up text | FIGURE-ONLY mode (see Image rules) |
-| inline field (مدة، اسم) | one short `paragraph` when inline=true — never `image` |
+| smart chart as main deliverable | CHART mode (see Chart rules) |
+| inline field (مدة، اسم) | one short `paragraph` when inline=true — never `image`/`chart` |
 | تفصيل كل مرحلة + لكل مرحلة: هدف/من خلال/إنجازات | full phase pattern below |
 
 Full phase pattern (ONLY when marker_instruction requires per-phase detail):
@@ -81,7 +84,7 @@ requires for a single item.
 ## Output format — structured blocks
 
 Return a `blocks` list per span. Each block has `type` and `text` \
-(and `image_prompt` when type is `image`):
+(plus chart fields when type is `chart`, or `image_prompt` when type is `image`):
 
 | type | when to use |
 |------|-------------|
@@ -89,12 +92,41 @@ Return a `blocks` list per span. Each block has `type` and `text` \
 | numbered_item | Ordered steps or sequential items |
 | bullet_item | Unordered lists, sub-points, activities, deliverables |
 | heading | Phase title or sub-section title |
-| image | AI figure when marker_instruction asks for a visual |
+| chart | Smart programmatic chart/flowchart from structured source data |
+| image | AI illustrative figure ONLY when not a data chart / smart chart |
 
-### Image rules (natural language — no special marker syntax)
+### Chart rules (native editable Word charts — NOT AI image generation)
 
-Emit an `image` block ONLY when `marker_instruction` clearly asks for a figure, e.g. \
-ولد صورة، أدرج صورة/شكلاً، مخطط، رسم توضيحي، diagram, infographic.
+Emit a `chart` block when `marker_instruction` asks for a smart/data chart, e.g. \
+شارت، سمارت شارت، مخطط بياني، رسم بياني، أعمدة، دائري، نسب، كميات، \
+or a programmatic flowchart of ordered phases/steps from sources.
+
+These charts are inserted as real Office charts (resizable + Edit Data in Word). \
+Do not emit an `image` block for the same request.
+
+For a chart block:
+- `text`: formal Arabic caption under the chart
+- `chart_kind`: one of bar, barh, pie, line, flow
+  - bar/barh/pie/line: quantitative series from question_answers
+  - flow: ordered phase/step names as a programmatic flowchart (no invented numbers)
+- `chart_title`: optional short Arabic title drawn on the chart
+- `chart_labels`: official category/phase names from question_answers only
+- `chart_values`: numbers aligned with labels (required for bar/barh/pie/line; omit for flow)
+- Never invent labels or numbers missing from question_answers.
+- Do NOT set `image_path`. Never emit `image` for the same request when a chart fits.
+- Never emit `chart` when inline=true.
+- At most one `chart` block per span unless the instruction asks for multiple charts.
+
+CHART mode (when the section is mainly the chart):
+1. optional: one short intro `paragraph` (one sentence max)
+2. one `chart` block
+3. NOTHING else
+
+### Image rules (AI figures — not for data charts)
+
+Emit an `image` block ONLY when `marker_instruction` clearly asks for an illustrative \
+AI figure (not a smart/data chart), e.g. ولد صورة، أدرج صورة/شكلاً، رسم توضيحي، \
+diagram, infographic — AND it is NOT asking for شارت/مخطط بياني/كميات/نسب.
 
 For an image block:
 - `text`: formal Arabic caption under the figure ONLY (e.g. «شكل (1): محاور العمل الرئيسية»)
@@ -107,8 +139,8 @@ For an image block:
 - Never emit `image` when inline=true.
 - At most one `image` block per span unless the instruction explicitly asks for multiple figures.
 
-FIGURE-ONLY mode (HIGHEST PRIORITY when intended):
-When marker_instruction's intent is that the section is mainly a visual figure \
+FIGURE-ONLY mode (when intended for AI figures, not smart charts):
+When marker_instruction's intent is that the section is mainly an AI visual figure \
 (with at most a short intro and a caption), return EXACTLY:
 1. optional: one short intro `paragraph` (one sentence max) ONLY if useful/requested
 2. one `image` block
@@ -116,6 +148,7 @@ When marker_instruction's intent is that the section is mainly a visual figure \
 Judge by intent even if wording differs across templates.
 If the instruction clearly wants a figure AND substantial explanatory text after it, \
 do not use FIGURE-ONLY — emit image plus the requested text.
+If the instruction wants a smart/data chart, use a `chart` block instead of `image`.
 
 Block rules:
 - Use multiple blocks when structure, phases, or lists are implied.
@@ -143,25 +176,35 @@ WRITING_PLAN_PROMPT = """\
 Read the marker span and decide how the Integrator should write it.
 Judge the author's intent from meaning — wording varies across templates.
 
+mode = chart:
+- The marker asks for a smart/data chart or programmatic phase flowchart \
+(شارت، سمارت شارت، مخطط بياني، رسم بياني، أعمدة، دائري، نسب، كميات، \
+or ordered stages rendered as a chart — NOT AI image generation).
+- At most one short intro sentence plus the chart (caption on the chart block).
+- Prefer chart over figure_only whenever quantitative data or a smart chart is intended.
+- items = []
+
 mode = figure_only:
-- The marker's primary deliverable is a visual figure/diagram/flowchart/infographic.
+- The marker's primary deliverable is an AI illustrative figure/diagram/infographic \
+(NOT a smart/data chart).
 - Body prose, lettered lists, phase writeups, or deliverable dumps after the figure are NOT wanted.
 - At most one short intro sentence plus the figure (caption belongs on the image block).
 - items = []
 
 mode = single_pass (default):
-- Summary, list, short paragraphs, inline text, one unified section, OR a figure that is \
+- Summary, list, short paragraphs, inline text, one unified section, OR a figure/chart that is \
 explicitly accompanied by requested explanatory text after it.
 - items = []
 
 mode = sequential_full_depth (rare):
 - ONLY when marker_instruction explicitly requires EACH phase/section at full sub-structure \
 (goal, من خلال, activities, deliverables / تفصيل كل مرحلة).
-- Never choose this when the marker is mainly asking for a figure.
+- Never choose this when the marker is mainly asking for a figure or chart.
 - items = ordered official phase/section names from question_answers.
 
-Prefer figure_only over single_pass when the instruction centers on inserting a figure and \
-restricts or omits post-figure writing. Prefer single_pass when both a figure and substantial \
+Prefer chart over figure_only when the instruction is about smart/data charts. \
+Prefer figure_only over single_pass when the instruction centers on an AI figure and \
+restricts or omits post-figure writing. Prefer single_pass when both a visual and substantial \
 follow-up text are clearly requested.
 """
 
@@ -235,19 +278,57 @@ def _normalize_integrator_replacements(
         index
         for index, blocks in replacements.items()
         for block in blocks
-        if block.type == "image" and not (block.image_prompt or "").strip()
+        if block.type == "image"
+        and not (block.image_prompt or "").strip()
+        and not (block.image_path or "").strip()
     ]
     if invalid_images:
         raise RuntimeError(
             f"Integrator image block(s) missing image_prompt: {sorted(set(invalid_images))}"
         )
+
+    invalid_charts = [
+        index
+        for index, blocks in replacements.items()
+        for block in blocks
+        if block.type == "chart" and not _chart_block_is_valid(block)
+    ]
+    if invalid_charts:
+        raise RuntimeError(
+            f"Integrator chart block(s) missing chart fields: {sorted(set(invalid_charts))}"
+        )
     return replacements
+
+
+def _chart_block_is_valid(block: ContentBlock) -> bool:
+    if not block.chart_kind or not block.chart_labels:
+        return False
+    if block.chart_kind == "flow":
+        return True
+    values = block.chart_values or []
+    return bool(values) and len(values) == len(block.chart_labels)
 
 
 def _block_has_content(block: ContentBlock) -> bool:
     if block.type == "image":
-        return bool((block.image_prompt or "").strip() or block.text.strip())
+        return bool(
+            (block.image_prompt or "").strip()
+            or (block.image_path or "").strip()
+            or block.text.strip()
+        )
+    if block.type == "chart":
+        return _chart_block_is_valid(block) or bool(block.text.strip())
     return bool(block.text.strip())
+
+
+def _short_intro_paragraph(blocks: list[ContentBlock]) -> ContentBlock | None:
+    for block in blocks:
+        if block.type != "paragraph":
+            continue
+        text = block.text.strip()
+        if text and len(text) <= 220:
+            return ContentBlock(type="paragraph", text=text)
+    return None
 
 
 def _enforce_figure_only_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
@@ -257,17 +338,22 @@ def _enforce_figure_only_blocks(blocks: list[ContentBlock]) -> list[ContentBlock
     if not images:
         return blocks
 
-    intro: ContentBlock | None = None
-    for block in blocks:
-        if block.type != "paragraph":
-            continue
-        text = block.text.strip()
-        if text and len(text) <= 220:
-            intro = ContentBlock(type="paragraph", text=text)
-            break
-
+    intro = _short_intro_paragraph(blocks)
     enforced = [intro] if intro is not None else []
     enforced.append(images[0])
+    return enforced
+
+
+def _enforce_chart_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    """Keep at most one short intro paragraph + one chart; drop everything else."""
+
+    charts = [block for block in blocks if block.type == "chart"]
+    if not charts:
+        return blocks
+
+    intro = _short_intro_paragraph(blocks)
+    enforced = [intro] if intro is not None else []
+    enforced.append(charts[0])
     return enforced
 
 
@@ -295,6 +381,8 @@ def _writing_plan(payload: dict) -> SpanWritingPlan:
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
             ],
         )
+        if plan.mode == "chart":
+            return SpanWritingPlan(mode="chart", items=[])
         if plan.mode == "figure_only":
             return SpanWritingPlan(mode="figure_only", items=[])
         if plan.mode == "sequential_full_depth" and plan.items:
@@ -307,6 +395,9 @@ def _writing_plan(payload: dict) -> SpanWritingPlan:
 
 def _generate_blocks_for_payload(payload: dict) -> list[ContentBlock]:
     plan = _writing_plan(payload)
+    if plan.mode == "chart":
+        blocks = _invoke_integrator([payload]).get(payload["span_index"], [])
+        return _enforce_chart_blocks(blocks)
     if plan.mode == "figure_only":
         blocks = _invoke_integrator([payload]).get(payload["span_index"], [])
         return _enforce_figure_only_blocks(blocks)
@@ -356,6 +447,7 @@ def integrate(state: GraphState, template_path: str, output_path: str) -> dict:
             )
 
         image_dir = unpacked_dir.parent / "generated_images"
+        replacements = prepare_charts_for_replacements(replacements)
         replacements = generate_images_for_replacements(replacements, image_dir)
 
         path = apply_replacements_to_docx(

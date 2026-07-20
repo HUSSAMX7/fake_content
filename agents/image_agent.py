@@ -150,6 +150,10 @@ def generate_images_for_replacements(
             if block.type != "image":
                 new_blocks.append(block)
                 continue
+            # Pre-rendered PNGs already have image_path.
+            if (block.image_path or "").strip():
+                new_blocks.append(block)
+                continue
             if generated >= MAX_IMAGES_PER_DOCUMENT:
                 logger.warning(
                     "Image limit (%s) reached; demoting remaining image blocks",

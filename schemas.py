@@ -49,30 +49,60 @@ class AllTagsAnswerOutput(BaseModel):
 
 
 class ContentBlock(BaseModel):
-    type: Literal["paragraph", "numbered_item", "bullet_item", "heading", "image"] = Field(
+    type: Literal[
+        "paragraph",
+        "numbered_item",
+        "bullet_item",
+        "heading",
+        "image",
+        "chart",
+    ] = Field(
         description=(
             "paragraph: body text. numbered_item: ordered list entry. "
             "bullet_item: bullet list entry. heading: section sub-heading. "
-            "image: AI-generated figure; text is the Arabic caption, image_prompt is the "
-            "English visual description used for image generation."
+            "image: AI-generated illustrative figure (not for data charts). "
+            "chart: smart native Word chart from structured data "
+            "(bar/barh/pie/line/flow) — editable and resizable in Word; never invent numbers."
         )
     )
     text: str = Field(
         description=(
             "Block text at the depth required by marker_instruction. "
-            "For image blocks: formal Arabic caption under the figure."
+            "For image/chart blocks: formal Arabic caption under the figure."
         )
     )
     image_prompt: str | None = Field(
         default=None,
         description=(
-            "Required for image blocks. Precise English visual prompt for image generation. "
-            "Unused for non-image blocks."
+            "Required for AI image blocks. Precise visual prompt for image generation. "
+            "Unused for chart blocks."
         ),
     )
     image_path: str | None = Field(
         default=None,
-        description="Filled after image generation with a local PNG path. Never emit this field.",
+        description="Filled after image/chart rendering with a local PNG path. Never emit this field.",
+    )
+    chart_kind: Literal["bar", "barh", "pie", "line", "flow"] | None = Field(
+        default=None,
+        description=(
+            "Required for chart blocks. bar/barh/pie/line for numeric series; "
+            "flow for ordered process/phase steps as a programmatic flowchart."
+        ),
+    )
+    chart_title: str | None = Field(
+        default=None,
+        description="Optional Arabic chart title drawn above the chart.",
+    )
+    chart_labels: list[str] | None = Field(
+        default=None,
+        description="Category/phase labels from sources only. Required for chart blocks.",
+    )
+    chart_values: list[float] | None = Field(
+        default=None,
+        description=(
+            "Numeric values aligned with chart_labels. Required for bar/barh/pie/line. "
+            "Empty/omitted for flow charts."
+        ),
     )
 
 
@@ -94,21 +124,24 @@ class IntegratorOutput(BaseModel):
 
 
 class SpanWritingPlan(BaseModel):
-    mode: Literal["single_pass", "sequential_full_depth", "figure_only"] = Field(
+    mode: Literal[
+        "single_pass",
+        "sequential_full_depth",
+        "figure_only",
+        "chart",
+    ] = Field(
         description=(
-            "single_pass: one writing call; follow marker_instruction depth exactly "
-            "(summary list, short paragraphs, inline field, figure with accompanying text, etc.). "
-            "figure_only: the marker wants a visual figure as the main deliverable — "
-            "at most one short intro sentence plus one image/caption; no body lists or phase writeups. "
-            "Judge intent from the instruction meaning, not fixed keywords. "
-            "sequential_full_depth: write each item in a separate call at maximum depth — "
-            "only when marker_instruction explicitly requires rich per-item structure "
-            "(e.g. per-phase goal, من خلال, activities, deliverables)."
+            "single_pass: one writing call; follow marker_instruction depth exactly. "
+            "figure_only: AI illustrative figure as main deliverable (not quantitative charts). "
+            "chart: smart native Word chart/flowchart from source data — editable in Word, "
+            "not AI image generation. "
+            "sequential_full_depth: rich per-item writing only when explicitly required. "
+            "Judge intent from meaning, not fixed keywords."
         )
     )
     items: list[str] = Field(
         description=(
             "Ordered official phase/section names. Required for sequential_full_depth. "
-            "Empty for single_pass and figure_only."
+            "Empty for single_pass, figure_only, and chart."
         )
     )

@@ -28,6 +28,7 @@ W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -37,12 +38,23 @@ ET.register_namespace("w", W_NS)
 ET.register_namespace("wp", WP_NS)
 ET.register_namespace("a", A_NS)
 ET.register_namespace("pic", PIC_NS)
+ET.register_namespace("c", C_NS)
 ET.register_namespace("r", R_NS)
 
 _EMU_PER_INCH = 914400
 _TARGET_IMAGE_WIDTH_EMU = 5486400  # ~6 inches / ~15 cm
+_TARGET_CHART_HEIGHT_EMU = 3291840  # ~3.6 inches
 _IMAGE_REL_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+)
+_CHART_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+)
+_CHART_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+)
+_XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
 _STORY_PART_RE = re.compile(
@@ -210,7 +222,7 @@ def _inline_text(blocks: list[ContentBlock]) -> str:
     return " ".join(
         _normalize_block_text(block)
         for block in blocks
-        if block.type != "image" and block.text.strip()
+        if block.type not in {"image", "chart"} and block.text.strip()
     )
 
 
@@ -219,7 +231,7 @@ def _should_render_as_blocks(span: dict, blocks: list[ContentBlock]) -> bool:
         raise ValueError(f"Empty replacement for marker {span['span_index']}")
     if span["inline"]:
         return False
-    if any(block.type == "image" for block in blocks):
+    if any(block.type in {"image", "chart"} for block in blocks):
         return True
     return len(blocks) > 1 or blocks[0].type != "paragraph"
 
@@ -550,6 +562,277 @@ def _copy_image_into_package(unpacked_dir: Path, source: Path) -> str:
         index += 1
 
 
+def _next_chart_index(unpacked_dir: Path) -> int:
+    charts_dir = unpacked_dir / "word" / "charts"
+    if not charts_dir.is_dir():
+        return 1
+    used: set[int] = set()
+    for path in charts_dir.glob("chart*.xml"):
+        match = re.fullmatch(r"chart(\d+)\.xml", path.name)
+        if match:
+            used.add(int(match.group(1)))
+    candidate = 1
+    while candidate in used:
+        candidate += 1
+    return candidate
+
+
+def _ensure_chart_content_types(unpacked_dir: Path, chart_name: str) -> None:
+    types_path = unpacked_dir / "[Content_Types].xml"
+    tree = ET.parse(str(types_path))
+    root = tree.getroot()
+
+    has_xlsx = False
+    for node in root.findall(f"{{{CT_NS}}}Default"):
+        if (node.get("Extension") or "").lower() == "xlsx":
+            has_xlsx = True
+            break
+    if not has_xlsx:
+        default = ET.SubElement(root, f"{{{CT_NS}}}Default")
+        default.set("Extension", "xlsx")
+        default.set("ContentType", _XLSX_CONTENT_TYPE)
+
+    part_name = f"/word/charts/{chart_name}"
+    for node in root.findall(f"{{{CT_NS}}}Override"):
+        if node.get("PartName") == part_name:
+            tree.write(str(types_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+            return
+    override = ET.SubElement(root, f"{{{CT_NS}}}Override")
+    override.set("PartName", part_name)
+    override.set("ContentType", _CHART_CONTENT_TYPE)
+    tree.write(str(types_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _register_chart_relationship(
+    unpacked_dir: Path,
+    part_name: str,
+    chart_name: str,
+) -> str:
+    rels_path = _rels_path_for_part(unpacked_dir, part_name)
+    rels_path.parent.mkdir(parents=True, exist_ok=True)
+    if rels_path.exists():
+        tree = ET.parse(str(rels_path))
+        root = tree.getroot()
+    else:
+        root = ET.Element(f"{{{REL_NS}}}Relationships")
+        tree = ET.ElementTree(root)
+
+    rel_id = _next_relationship_id(root)
+    relationship = ET.SubElement(root, f"{{{REL_NS}}}Relationship")
+    relationship.set("Id", rel_id)
+    relationship.set("Type", _CHART_REL_TYPE)
+    relationship.set("Target", f"charts/{chart_name}")
+    tree.write(str(rels_path), xml_declaration=True, encoding="UTF-8", standalone=True)
+    return rel_id
+
+
+def _pptx_chart_type(kind: str):
+    from pptx.enum.chart import XL_CHART_TYPE
+
+    mapping = {
+        "bar": XL_CHART_TYPE.COLUMN_CLUSTERED,
+        "barh": XL_CHART_TYPE.BAR_CLUSTERED,
+        "pie": XL_CHART_TYPE.PIE,
+        "line": XL_CHART_TYPE.LINE_MARKERS,
+    }
+    if kind not in mapping:
+        raise ValueError(f"Unsupported native chart kind: {kind}")
+    return mapping[kind]
+
+
+def _materialize_chart_parts(
+    unpacked_dir: Path,
+    block: ContentBlock,
+) -> str:
+    """Build an Office chart via python-pptx and copy parts into the Word package."""
+
+    from pptx import Presentation
+    from pptx.chart.data import CategoryChartData
+    from pptx.util import Inches
+
+    kind = block.chart_kind or "bar"
+    labels = list(block.chart_labels or [])
+    values = [float(value) for value in (block.chart_values or [])]
+    series_name = (block.chart_title or "بيانات").strip() or "بيانات"
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    data = CategoryChartData()
+    data.categories = labels
+    data.add_series(series_name, tuple(values))
+    chart_shape = slide.shapes.add_chart(
+        _pptx_chart_type(kind),
+        Inches(0.5),
+        Inches(0.5),
+        Inches(6),
+        Inches(3.6),
+        data,
+    )
+    if block.chart_title and block.chart_title.strip():
+        chart = chart_shape.chart
+        chart.has_title = True
+        chart.chart_title.text_frame.text = block.chart_title.strip()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pptx_path = Path(tmp) / "chart_source.pptx"
+        presentation.save(pptx_path)
+        extract_dir = Path(tmp) / "extracted"
+        with zipfile.ZipFile(pptx_path) as archive:
+            archive.extractall(extract_dir)
+
+        source_chart = extract_dir / "ppt" / "charts" / "chart1.xml"
+        source_rels = extract_dir / "ppt" / "charts" / "_rels" / "chart1.xml.rels"
+        embeddings_dir = extract_dir / "ppt" / "embeddings"
+        embedding_files = sorted(embeddings_dir.glob("*.xlsx")) if embeddings_dir.is_dir() else []
+        if not source_chart.is_file() or not source_rels.is_file() or not embedding_files:
+            raise RuntimeError("Failed to materialize Office chart parts")
+
+        chart_index = _next_chart_index(unpacked_dir)
+        chart_name = f"chart{chart_index}.xml"
+        embedding_name = f"Microsoft_Excel_Sheet{chart_index}.xlsx"
+
+        charts_dir = unpacked_dir / "word" / "charts"
+        charts_rels_dir = charts_dir / "_rels"
+        embeddings_out = unpacked_dir / "word" / "embeddings"
+        charts_dir.mkdir(parents=True, exist_ok=True)
+        charts_rels_dir.mkdir(parents=True, exist_ok=True)
+        embeddings_out.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(source_chart, charts_dir / chart_name)
+        shutil.copy2(embedding_files[0], embeddings_out / embedding_name)
+
+        rels_tree = ET.parse(str(source_rels))
+        for relationship in rels_tree.getroot().findall(f"{{{REL_NS}}}Relationship"):
+            target = relationship.get("Target") or ""
+            if target.endswith(".xlsx") or "embeddings/" in target.replace("\\", "/"):
+                relationship.set("Target", f"../embeddings/{embedding_name}")
+        rels_tree.write(
+            str(charts_rels_dir / f"{chart_name}.rels"),
+            xml_declaration=True,
+            encoding="UTF-8",
+            standalone=True,
+        )
+
+    _ensure_chart_content_types(unpacked_dir, chart_name)
+    return chart_name
+
+
+def _build_chart_drawing_run(rel_id: str, cx: int, cy: int, doc_pr_id: int) -> ET.Element:
+    run = ET.Element(_tag("r"))
+    drawing = ET.SubElement(run, _tag("drawing"))
+    inline = ET.SubElement(
+        drawing,
+        f"{{{WP_NS}}}inline",
+        {
+            "distT": "0",
+            "distB": "0",
+            "distL": "0",
+            "distR": "0",
+        },
+    )
+    ET.SubElement(inline, f"{{{WP_NS}}}extent", {"cx": str(cx), "cy": str(cy)})
+    ET.SubElement(
+        inline,
+        f"{{{WP_NS}}}effectExtent",
+        {"l": "0", "t": "0", "r": "0", "b": "0"},
+    )
+    ET.SubElement(
+        inline,
+        f"{{{WP_NS}}}docPr",
+        {"id": str(doc_pr_id), "name": f"Chart {doc_pr_id}"},
+    )
+    ET.SubElement(inline, f"{{{WP_NS}}}cNvGraphicFramePr")
+    graphic = ET.SubElement(inline, f"{{{A_NS}}}graphic")
+    graphic_data = ET.SubElement(
+        graphic,
+        f"{{{A_NS}}}graphicData",
+        {"uri": "http://schemas.openxmlformats.org/drawingml/2006/chart"},
+    )
+    ET.SubElement(
+        graphic_data,
+        f"{{{C_NS}}}chart",
+        {f"{{{R_NS}}}id": rel_id},
+    )
+    return run
+
+
+def _flow_table_element(source: ET.Element, labels: list[str]) -> ET.Element:
+    table = ET.Element(_tag("tbl"))
+    tbl_pr = ET.SubElement(table, _tag("tblPr"))
+    ET.SubElement(tbl_pr, _tag("tblW"), {"w": "5000", "type": "pct"})
+    borders = ET.SubElement(tbl_pr, _tag("tblBorders"))
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        ET.SubElement(
+            borders,
+            _tag(edge),
+            {"val": "single", "sz": "8", "space": "0", "color": "1F4E79"},
+        )
+    grid = ET.SubElement(table, _tag("tblGrid"))
+    for _ in labels:
+        ET.SubElement(grid, _tag("gridCol"), {"w": str(max(800, 5000 // len(labels)))})
+
+    row = ET.SubElement(table, _tag("tr"))
+    run_props = _first_run_properties(source)
+    # RTL reading: rightmost cell = first phase.
+    for label in reversed(labels):
+        cell = ET.SubElement(row, _tag("tc"))
+        tc_pr = ET.SubElement(cell, _tag("tcPr"))
+        ET.SubElement(tc_pr, _tag("tcW"), {"w": "0", "type": "auto"})
+        ET.SubElement(tc_pr, _tag("shd"), {"val": "clear", "color": "auto", "fill": "F7FAFC"})
+        cell_p = ET.SubElement(cell, _tag("p"))
+        source_ppr = source.find(_tag("pPr"))
+        if source_ppr is not None:
+            cell_p.append(copy.deepcopy(source_ppr))
+        run = ET.SubElement(cell_p, _tag("r"))
+        if run_props is not None:
+            run.append(copy.deepcopy(run_props))
+        text_node = ET.SubElement(run, _tag("t"))
+        _set_text(text_node, label)
+    return table
+
+
+def _generated_chart_paragraphs(
+    source: ET.Element,
+    block: ContentBlock,
+    unpacked_dir: Path,
+    part_name: str,
+    doc_pr_id: int,
+) -> list[ET.Element]:
+    kind = block.chart_kind or "bar"
+    if kind == "flow":
+        labels = [label.strip() for label in (block.chart_labels or []) if label.strip()]
+        if not labels:
+            raise ValueError("flow chart has no labels")
+        # Tables are valid body children alongside paragraphs.
+        elements: list[ET.Element] = [_flow_table_element(source, labels)]
+        if block.text.strip():
+            elements.append(
+                _generated_paragraph(source, ContentBlock(type="paragraph", text=block.text))
+            )
+        return elements
+
+    chart_name = _materialize_chart_parts(unpacked_dir, block)
+    rel_id = _register_chart_relationship(unpacked_dir, part_name, chart_name)
+    paragraph = ET.Element(_tag("p"))
+    source_ppr = source.find(_tag("pPr"))
+    if source_ppr is not None:
+        paragraph.append(copy.deepcopy(source_ppr))
+    paragraph.append(
+        _build_chart_drawing_run(
+            rel_id,
+            _TARGET_IMAGE_WIDTH_EMU,
+            _TARGET_CHART_HEIGHT_EMU,
+            doc_pr_id,
+        )
+    )
+    paragraphs = [paragraph]
+    if block.text.strip():
+        paragraphs.append(
+            _generated_paragraph(source, ContentBlock(type="paragraph", text=block.text))
+        )
+    return paragraphs
+
+
 def _build_drawing_run(
     rel_id: str,
     media_name: str,
@@ -646,6 +929,40 @@ def _paragraphs_for_block(
     part_name: str,
     doc_pr_counter: list[int],
 ) -> list[ET.Element]:
+    if block.type == "chart":
+        if unpacked_dir is None:
+            if block.text.strip():
+                return [
+                    _generated_paragraph(
+                        source, ContentBlock(type="paragraph", text=block.text)
+                    )
+                ]
+            raise ValueError("Chart block requires unpacked document package")
+        try:
+            paragraphs = _generated_chart_paragraphs(
+                source,
+                block,
+                unpacked_dir,
+                part_name,
+                doc_pr_counter[0],
+            )
+            if block.chart_kind != "flow":
+                doc_pr_counter[0] += 1
+            return paragraphs
+        except Exception:
+            logger.exception("Native chart embedding failed; falling back to caption")
+            if block.text.strip():
+                return [
+                    _generated_paragraph(
+                        source, ContentBlock(type="paragraph", text=block.text)
+                    )
+                ]
+            return [
+                _generated_paragraph(
+                    source, ContentBlock(type="paragraph", text="\u00a0")
+                )
+            ]
+
     if block.type != "image":
         return [_generated_paragraph(source, block)]
     if not block.image_path or unpacked_dir is None:
@@ -756,8 +1073,8 @@ def _replace_block_preserving_source_paragraph(
 
     counter = doc_pr_counter if doc_pr_counter is not None else [1]
     first, *rest = blocks
-    if first.type == "image":
-        # Keep protected furniture; clear marker, then insert drawing (+ caption) after.
+    if first.type in {"image", "chart"}:
+        # Keep protected furniture; clear marker, then insert drawing/table (+ caption) after.
         _replace_inline(root, span, [ContentBlock(type="paragraph", text="\u00a0")])
         anchor_paragraph = _detach_floating_runs(source)
         parent = source.getparent()

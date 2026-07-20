@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from agents.integrator import (
+    _enforce_chart_blocks,
     _enforce_figure_only_blocks,
     _normalize_integrator_replacements,
 )
@@ -106,6 +107,36 @@ class IntegratorCoverageTests(unittest.TestCase):
         self.assertEqual(len(enforced), 2)
         self.assertEqual(enforced[0].type, "paragraph")
         self.assertEqual(enforced[1].type, "image")
+
+    def test_chart_block_requires_fields(self) -> None:
+        result = IntegratorOutput(
+            replacements=[
+                SpanReplacement(
+                    span_index=1,
+                    tag_id="TAG_01",
+                    blocks=[
+                        ContentBlock(type="chart", text="شكل", chart_kind="bar"),
+                    ],
+                ),
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeError, "chart fields"):
+            _normalize_integrator_replacements(result, expected={1})
+
+    def test_enforce_chart_mode(self) -> None:
+        blocks = [
+            _paragraph("يوضح الشكل التالي:"),
+            ContentBlock(
+                type="chart",
+                text="شكل (1)",
+                chart_kind="flow",
+                chart_labels=["أ", "ب"],
+            ),
+            _paragraph("نص طويل يجب حذفه في وضع الشارت"),
+        ]
+        enforced = _enforce_chart_blocks(blocks)
+        self.assertEqual(len(enforced), 2)
+        self.assertEqual(enforced[1].type, "chart")
 
 
 if __name__ == "__main__":

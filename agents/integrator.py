@@ -63,6 +63,7 @@ Write at the level of a winning Saudi government technical proposal:
 | قائمة أهداف، جملة واحدة لكل هدف | `bullet_item` per objective — one sentence each |
 | قائمة + شرح بسيط عن كل مرحلة | `numbered_item` per phase — name + 1–2 sentence explanation |
 | ولد صورة / أدرج شكلاً / مخطط / رسم توضيحي | include one `image` block (see Image rules) |
+| figure as main deliverable with little/no follow-up text | FIGURE-ONLY mode (see Image rules) |
 | inline field (مدة، اسم) | one short `paragraph` when inline=true — never `image` |
 | تفصيل كل مرحلة + لكل مرحلة: هدف/من خلال/إنجازات | full phase pattern below |
 
@@ -96,14 +97,25 @@ Emit an `image` block ONLY when `marker_instruction` clearly asks for a figure, 
 ولد صورة، أدرج صورة/شكلاً، مخطط، رسم توضيحي، diagram, infographic.
 
 For an image block:
-- `text`: formal Arabic caption under the figure (e.g. «شكل (1): مراحل تنفيذ المشروع»)
-- `image_prompt`: precise English visual description grounded in question_answers \
-  (real phase names, real structure). Describe boxes, arrows, and layout. \
+- `text`: formal Arabic caption under the figure ONLY (e.g. «شكل (1): محاور العمل الرئيسية»)
+- `image_prompt`: precise visual description grounded in question_answers \
+  (real official Arabic names from sources). Describe boxes, arrows, RTL layout. \
+  Labels inside the figure must use the official Arabic names from question_answers — \
+  do NOT translate stage/axis names into English unless the sources are English. \
   Do not invent phases, entities, or facts missing from question_answers.
 - Do NOT set `image_path` — it is filled later by the system.
-- Suggested order: optional short intro paragraph → one `image` → remaining text/lists as required.
 - Never emit `image` when inline=true.
 - At most one `image` block per span unless the instruction explicitly asks for multiple figures.
+
+FIGURE-ONLY mode (HIGHEST PRIORITY when intended):
+When marker_instruction's intent is that the section is mainly a visual figure \
+(with at most a short intro and a caption), return EXACTLY:
+1. optional: one short intro `paragraph` (one sentence max) ONLY if useful/requested
+2. one `image` block
+3. NOTHING else — no headings, no lettered lists, no deliverables, no phase summaries
+Judge by intent even if wording differs across templates.
+If the instruction clearly wants a figure AND substantial explanatory text after it, \
+do not use FIGURE-ONLY — emit image plus the requested text.
 
 Block rules:
 - Use multiple blocks when structure, phases, or lists are implied.
@@ -129,20 +141,30 @@ Word handles list formatting.
 
 WRITING_PLAN_PROMPT = """\
 Read the marker span and decide how the Integrator should write it.
+Judge the author's intent from meaning — wording varies across templates.
 
-mode = single_pass (default):
-- marker_instruction asks for summary, list, simple explanation, short paragraphs, inline text, \
-or one unified section — even if it mentions multiple phases.
-- Examples: "قائمة + شرح بسيط"، "ملخص"، "فقرة أو فقرتين"، "2-3 فقرات"، "جملة واحدة لكل هدف"
+mode = figure_only:
+- The marker's primary deliverable is a visual figure/diagram/flowchart/infographic.
+- Body prose, lettered lists, phase writeups, or deliverable dumps after the figure are NOT wanted.
+- At most one short intro sentence plus the figure (caption belongs on the image block).
 - items = []
 
-mode = sequential_full_depth (rare — only when instruction explicitly demands rich per-item structure):
-- marker_instruction requires EACH phase/section written with full sub-structure: goal, من خلال, \
-activities, deliverables, or says "تفصيل كل مرحلة" / "غني بالتفاصيل" with per-phase breakdown.
-- items = ordered official phase/section names from question_answers (from كراسة/BOQ).
+mode = single_pass (default):
+- Summary, list, short paragraphs, inline text, one unified section, OR a figure that is \
+explicitly accompanied by requested explanatory text after it.
+- items = []
 
-Never use sequential_full_depth for summary or list-style instructions.
+mode = sequential_full_depth (rare):
+- ONLY when marker_instruction explicitly requires EACH phase/section at full sub-structure \
+(goal, من خلال, activities, deliverables / تفصيل كل مرحلة).
+- Never choose this when the marker is mainly asking for a figure.
+- items = ordered official phase/section names from question_answers.
+
+Prefer figure_only over single_pass when the instruction centers on inserting a figure and \
+restricts or omits post-figure writing. Prefer single_pass when both a figure and substantial \
+follow-up text are clearly requested.
 """
+
 
 def _build_span_payloads(
     template_path: str,
@@ -228,6 +250,27 @@ def _block_has_content(block: ContentBlock) -> bool:
     return bool(block.text.strip())
 
 
+def _enforce_figure_only_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    """Keep at most one short intro paragraph + one image; drop everything else."""
+
+    images = [block for block in blocks if block.type == "image"]
+    if not images:
+        return blocks
+
+    intro: ContentBlock | None = None
+    for block in blocks:
+        if block.type != "paragraph":
+            continue
+        text = block.text.strip()
+        if text and len(text) <= 220:
+            intro = ContentBlock(type="paragraph", text=text)
+            break
+
+    enforced = [intro] if intro is not None else []
+    enforced.append(images[0])
+    return enforced
+
+
 def _invoke_integrator(payloads: list[dict]) -> dict[int, list[ContentBlock]]:
     result = invoke_structured(
         IntegratorOutput,
@@ -245,13 +288,18 @@ def _writing_plan(payload: dict) -> SpanWritingPlan:
         return SpanWritingPlan(mode="single_pass", items=[])
 
     try:
-        return invoke_structured(
+        plan = invoke_structured(
             SpanWritingPlan,
             [
                 SystemMessage(content=WRITING_PLAN_PROMPT),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
             ],
         )
+        if plan.mode == "figure_only":
+            return SpanWritingPlan(mode="figure_only", items=[])
+        if plan.mode == "sequential_full_depth" and plan.items:
+            return SpanWritingPlan(mode="sequential_full_depth", items=plan.items)
+        return SpanWritingPlan(mode="single_pass", items=[])
     except Exception:
         # Prefer completing generation over failing the whole request on a planning parse error.
         return SpanWritingPlan(mode="single_pass", items=[])
@@ -259,6 +307,10 @@ def _writing_plan(payload: dict) -> SpanWritingPlan:
 
 def _generate_blocks_for_payload(payload: dict) -> list[ContentBlock]:
     plan = _writing_plan(payload)
+    if plan.mode == "figure_only":
+        blocks = _invoke_integrator([payload]).get(payload["span_index"], [])
+        return _enforce_figure_only_blocks(blocks)
+
     if plan.mode != "sequential_full_depth" or len(plan.items) <= 1:
         return _invoke_integrator([payload]).get(payload["span_index"], [])
 

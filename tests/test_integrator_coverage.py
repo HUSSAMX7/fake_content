@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from agents.integrator import _normalize_integrator_replacements
-from schemas import ContentBlock, IntegratorOutput, SpanReplacement
+from agents.integrator import (
+    _enforce_figure_only_blocks,
+    _normalize_integrator_replacements,
+)
+from schemas import ContentBlock, IntegratorOutput, SpanReplacement, SpanWritingPlan
 
 
 def _paragraph(text: str) -> ContentBlock:
@@ -82,6 +85,27 @@ class IntegratorCoverageTests(unittest.TestCase):
         replacements = _normalize_integrator_replacements(result, expected={1})
         self.assertEqual(replacements[1][0].type, "image")
         self.assertTrue(replacements[1][0].image_prompt)
+
+    def test_span_writing_plan_accepts_figure_only_mode(self) -> None:
+        plan = SpanWritingPlan(mode="figure_only", items=[])
+        self.assertEqual(plan.mode, "figure_only")
+
+    def test_enforce_figure_only_keeps_intro_and_image(self) -> None:
+        blocks = [
+            _paragraph("يتم التنفيذ وفق المراحل التالية:"),
+            ContentBlock(
+                type="image",
+                text="شكل (1): المراحل",
+                image_prompt="RTL flowchart with Arabic stage names",
+            ),
+            ContentBlock(type="heading", text="أ) تقييم الوضع الراهن"),
+            _paragraph("شرح طويل لا يجب أن يبقى"),
+            ContentBlock(type="bullet_item", text="مخرجات"),
+        ]
+        enforced = _enforce_figure_only_blocks(blocks)
+        self.assertEqual(len(enforced), 2)
+        self.assertEqual(enforced[0].type, "paragraph")
+        self.assertEqual(enforced[1].type, "image")
 
 
 if __name__ == "__main__":

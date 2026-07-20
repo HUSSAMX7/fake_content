@@ -94,10 +94,13 @@ class IntegratorOutput(BaseModel):
 
 
 class SpanWritingPlan(BaseModel):
-    mode: Literal["single_pass", "sequential_full_depth"] = Field(
+    mode: Literal["single_pass", "sequential_full_depth", "figure_only"] = Field(
         description=(
             "single_pass: one writing call; follow marker_instruction depth exactly "
-            "(summary list, short paragraphs, inline field, etc.). "
+            "(summary list, short paragraphs, inline field, figure with accompanying text, etc.). "
+            "figure_only: the marker wants a visual figure as the main deliverable — "
+            "at most one short intro sentence plus one image/caption; no body lists or phase writeups. "
+            "Judge intent from the instruction meaning, not fixed keywords. "
             "sequential_full_depth: write each item in a separate call at maximum depth — "
             "only when marker_instruction explicitly requires rich per-item structure "
             "(e.g. per-phase goal, من خلال, activities, deliverables)."
@@ -106,6 +109,6 @@ class SpanWritingPlan(BaseModel):
     items: list[str] = Field(
         description=(
             "Ordered official phase/section names. Required for sequential_full_depth. "
-            "Empty for single_pass."
+            "Empty for single_pass and figure_only."
         )
     )

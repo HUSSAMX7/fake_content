@@ -25,7 +25,8 @@ _STYLE_PREFIX = (
     "Professional technical illustration for a formal Saudi government proposal. "
     "Clean flat diagram style, light background, clear boxes and arrows, "
     "no photorealistic people, no logos, no watermarks, no decorative clutter. "
-    "Prefer short English labels inside the diagram. "
+    "Use official Arabic labels from the prompt for stage/axis names; "
+    "do not translate those names into English. "
 )
 
 
